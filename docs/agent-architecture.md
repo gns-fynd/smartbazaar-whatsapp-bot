@@ -108,7 +108,7 @@ This section replaces the earlier "checkout state machine to implement after con
 
 ### Gates
 
-`JIOMART_CART_WRITES` enables real cart writes, address selection and CART edits. `JIOMART_CHECKOUT` additionally enables payment options, order submission and the order watcher; it has no effect without cart writes. The `/pay` and `/paid` routes always exist but serve only stored, unexpired links. Both default to false and are enforced in both `JioMartClient` and `CheckoutFlow`. `ShoppingAgent` receives the same flags only to describe capabilities, and model input cannot change them. `CHECKOUT_MAX_TOTAL` (default ₹1,500, allowed 1–20,000) caps a single confirmed order.
+`JIOMART_CART_WRITES` enables real cart writes, address selection and CART edits. `JIOMART_CHECKOUT` additionally enables payment options, order submission and the order watcher; it has no effect without cart writes. The `/pay` and `/paid` routes always exist but serve only stored, unexpired links. Both default to false and are enforced in both `JioMartClient` and `CheckoutFlow`. `ShoppingAgent` receives the same flags only to describe capabilities, and model input cannot change them. `CHECKOUT_MAX_TOTAL` (optional; default 0 = no limit since 19 October, earlier ₹1,500) caps a single confirmed order when set.
 
 ### Flow
 

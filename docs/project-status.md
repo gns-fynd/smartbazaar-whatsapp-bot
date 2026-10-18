@@ -36,6 +36,10 @@ This section supersedes the late-evening 18 October section below where they dif
 
 - `open_payment_session` follows payment redirects with the account cookie while the host ends in `jiomart.com` or `jiomartjcp.com`, using a plain suffix match rather than the dot-boundary match now used for invoice downloads and payment links. A lookalike host such as `evil-jiomart.com` would have passed. No such redirect was observed. Fixed later on 19 October: hops now use the same dot-boundary match (`host == h or host.endswith("." + h)`), and `tests/test_commerce_tools.py` checks that a lookalike host is never requested.
 
+### Deployed and first live feedback (19 October, about 02:35 IST)
+
+The owner ran the deploy from the source checkout (the supervised app restarted, all 18 source files matched, local and public `/readyz` returned 200; backup in the runtime's `work/rollback-smartbazaar-20261019`). In the first live checkout the owner reported that "make payment" seemed to show the cart again. Cause: the ₹2,849 total was above `CHECKOUT_MAX_TOTAL` (₹1,500), and the blocked review reused the cart card's layout with the reason at the bottom. The same card showed "Discount: ₹-650" plus an invented "Delivery & other charges: ₹650", because JioMart's subtotal already had the discount in it. Fixed in source (not yet redeployed): a blocked review now starts with "⚠️ Can’t place this order yet" and the reason. The breakup shows "Items: ₹2,849 (you save ₹650)" when the discount is already in the subtotal (an `mrp_total` match, or the totals only balancing without it). 309 tests pass. The owner then removed the limit: `CHECKOUT_MAX_TOTAL` now defaults to 0 (no limit) and remains available as an optional ceiling; every order still needs a payment tap on the exact reviewed total. 310 tests pass.
+
 ## Late evening 18 October 2026 — first live order, cart as the basket, agentic replies
 
 *Partly superseded by the 19 October section above: the shopping list, ADD MY LIST, CLEAR LIST and the "Session refresh" item below describe the 18 October build.*

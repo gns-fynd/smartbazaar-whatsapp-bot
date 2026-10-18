@@ -62,7 +62,7 @@ Before sharing the bot, confirm the sender is allowlisted, the Meta test recipie
 |---|---|---|
 | `JIOMART_CART_WRITES` | `false` | Real JioMart cart adds/updates/removals and saved-address selection; CART shows the real cart. When off, CART shows the local list and CHECKOUT only explains |
 | `JIOMART_CHECKOUT` | `false` | Payment options, order submission and the order-watch worker. Ignored unless cart writes are on |
-| `CHECKOUT_MAX_TOTAL` | `1500` (1–20000) | Largest JioMart total, in rupees, the bot may submit after confirmation |
+| `CHECKOUT_MAX_TOTAL` | `0` = no limit (0–200000; was 1500 until 19 Oct) | Optional largest JioMart total, in rupees, the bot may submit after confirmation. The owner removed the default cap on 19 Oct: every order already needs a payment tap on the exact reviewed total |
 | `PUBLIC_BASE_URL` | empty | Stable `https://` origin for payment links. When empty, the app asks the local ngrok agent API (`http://127.0.0.1:4040/api/tunnels`) for the HTTPS tunnel serving port 8080, rechecking at most once a minute. Request headers are never used |
 | `WHATSAPP_DISPLAY_NUMBER` | empty | Digits for the “Back to WhatsApp” `wa.me` button on the return page; otherwise `whatsapp://` |
 | `ORDER_WATCH_INTERVAL_SECONDS` | `20` (5–600) | Order-watcher polling interval |

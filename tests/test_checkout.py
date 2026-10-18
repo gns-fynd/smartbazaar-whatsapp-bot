@@ -283,6 +283,17 @@ async def test_plain_checkout_reviews_the_cart_without_adding_anything(tmp_path)
     assert "1 × Tomato 1 kg" in reply[0] and "Whey" not in reply[0]
 
 
+def test_breakup_never_invents_a_fee_when_the_discount_is_already_in_the_item_total():
+    # Live 19 Oct: items ₹2,849, discount −₹650, total ₹2,849 showed a fake ₹650 "other charges".
+    cart = {"price_breakup": {"raw": [{"name": "subtotal", "amount": 2849}, {"name": "discount", "amount": -650},
+                                      {"name": "total", "amount": 2849}]}}
+    assert CheckoutFlow._breakup_lines(cart) == ["Items: ₹2,849 (you save ₹650)", "Total: ₹2,849"]
+    with_mrp = {"price_breakup": {"raw": [{"name": "mrp_total", "amount": 3499}, {"name": "subtotal", "amount": 2849},
+                                          {"name": "discount", "amount": -650}, {"name": "delivery_charge", "amount": 30},
+                                          {"name": "total", "amount": 2879}]}}
+    assert CheckoutFlow._breakup_lines(with_mrp) == ["Items: ₹2,849 (you save ₹650)", "Delivery: ₹30", "Total: ₹2,879"]
+
+
 def test_breakup_shows_unmapped_charges_so_the_total_always_adds_up():
     cart = {"price_breakup": {"raw": [{"name": "subtotal", "amount": 49}, {"name": "discount", "amount": -3},
                                       {"name": "handling_fee", "amount": 33}, {"name": "total", "amount": 79}]}}
@@ -399,7 +410,7 @@ async def test_checkout_enabled_adds_place_order_button_disabled_omits_it(tmp_pa
 @pytest.mark.parametrize(
     ("kind", "expected_substring"),
     [
-        ("total_too_high", "up to ₹10"),
+        ("total_too_high", "The total ₹36 is above the ₹10 limit for orders from this chat"),
         ("unavailable_item", "be delivered right now"),
         ("missing_address_id", "Choose a saved delivery address with ADDRESSES"),
         ("partial_coverage", "safely place this order"),
@@ -445,6 +456,8 @@ async def test_blockers_suppress_the_place_order_button(tmp_path, kind, expected
     # A blocked review explains why and offers ways forward, never a payment button.
     prompt = reply[-1]
     assert prompt["type"] == "quick_reply" and expected_substring in prompt["body"]
+    # The reason leads, so a blocked checkout never looks like the plain cart view.
+    assert prompt["body"].startswith("⚠️ Can’t place this order yet:\n")
     titles = [button["title"] for button in prompt["buttons"]]
     assert titles[-2:] == ["Keep shopping", "Empty cart"]
     assert ("Remove unavailable" in titles) == (kind == "unavailable_item")
@@ -992,3 +1005,16 @@ def test_normalize_products_builds_cart_reference_with_optional_store_and_vertic
     # seller_id remains required.
     missing_seller = normalize_products([{**raw_item, "seller_id": None}])
     assert missing_seller[0]["cart"] is None
+
+
+@pytest.mark.asyncio
+async def test_no_order_limit_by_default_so_a_large_cart_can_be_paid(tmp_path):
+    store = new_store(tmp_path)
+    state = make_state()
+    commerce = FakeCommerce(lines=[make_cart_line("101", 1, 0, "MuscleBlaze Whey 500 g", 2849.0)])
+    flow = CheckoutFlow(store, commerce, cart_writes=True, checkout=True)
+
+    reply = await flow.prepare("owner", state, {}, store.memory_key(state["session"]))
+
+    assert any(button["title"] == "Cash on delivery" for button in reply[-1]["buttons"])
+    assert "limit" not in reply[-1]["body"]

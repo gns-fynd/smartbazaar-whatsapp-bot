@@ -34,7 +34,8 @@ class Settings(BaseSettings):
     # Customer-initiated shipment cancellation; independent of the cart/checkout flags.
     jiomart_order_cancel: bool = False
     # POC safety cap on a single confirmed order total, in rupees.
-    checkout_max_total: int = Field(default=1500, ge=1, le=20000)
+    # Optional ceiling (INR) on a chat order's total; 0 means none. Every order still needs a payment tap.
+    checkout_max_total: int = Field(default=0, ge=0, le=200000)
     # Online payment: the bot opens JioMart's payment session server-side with the account's
     # sign-in and hands the browser JioPay's page (proven 18 Oct 2026). Each session opens once.
     jiomart_online_payment: bool = False

@@ -199,3 +199,24 @@ async def test_document_is_uploaded_as_a_pdf_and_sent_as_a_file():
         with pytest.raises(DeliveryError):
             await client.send("919000000001", bad)
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_checkout_card_leads_with_the_reason_not_the_cart(tmp_path):
+    store = Store(str(tmp_path / "bot.sqlite3"), Fernet.generate_key().decode())
+    state = {"session": {"account_reference": "u1", "cookies": []},
+             "location": {"id": "a1", "label": "Home", "city": "Mumbai", "pincode": "400053"}}
+
+    class Commerce(CardCommerce):
+        async def select_address(self, *args):
+            return None
+
+    flow = CheckoutFlow(store, Commerce(), cart_writes=True, checkout=True, max_total=50)
+
+    card = (await flow.prepare("owner", state, {}, "acct"))[0]
+
+    assert card["type"] == "cart_card"
+    assert card["body"].startswith("⚠️ Can’t place this order yet:\nThe total ₹96 is above the ₹50 limit")
+    assert "In your cart:\n• 2 × Tomato Hybrid 1 kg — ₹96" in card["body"]
+    assert [b["title"] for b in card["buttons"]] == ["Keep shopping", "Empty cart"]
+    store.close()

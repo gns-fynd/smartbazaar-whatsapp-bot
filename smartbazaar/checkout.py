@@ -41,11 +41,12 @@ def _line_key(identifiers: dict, size: str | None) -> tuple[str, str] | None:
 
 
 class CheckoutFlow:
-    def __init__(self, store, commerce, *, cart_writes=False, checkout=False, max_total=1500, public_origin=None,
+    def __init__(self, store, commerce, *, cart_writes=False, checkout=False, max_total=0, public_origin=None,
                  online_payment=False):
         self.store, self.commerce = store, commerce
         self.cart_writes = cart_writes
         self.checkout_enabled = cart_writes and checkout
+        # 0 means no ceiling: the customer's tap on the exact reviewed total is the confirmation.
         self.max_total = max_total
         # Returns the bot's current public HTTPS origin (for payment links), or None.
         self.public_origin = public_origin or (lambda: None)
@@ -362,8 +363,9 @@ class CheckoutFlow:
             blockers.append("JioMart reports this cart isn’t ready for checkout yet.")
         if total is None:
             blockers.append("JioMart didn’t return a total, so I can’t place this order.")
-        elif total > self.max_total:
-            blockers.append(f"This test setup only places orders up to {_money(self.max_total)}. Remove something, then send CHECKOUT.")
+        elif self.max_total and total > self.max_total:
+            blockers.append(f"The total {_money(total)} is above the {_money(self.max_total)} limit for orders from this chat. "
+                            "Remove something (say ‘remove 1 from cart’), then CHECKOUT again.")
         if not address.get("id"):
             blockers.append("Choose a saved delivery address with ADDRESSES before ordering.")
         elif state.pop("address_selected", True) is False:
@@ -399,14 +401,21 @@ class CheckoutFlow:
             }
             closing = ["How would you like to pay?", *(options[m] for m in methods),
                        "Tapping a payment option places the order. These buttons expire in 30 minutes."]
-        card = self._cart_card(cart, "🛒 These are your cart items:", buttons, [deliver, *closing],
-                               fallback="\n".join(lines + closing))
+        if self.checkout_enabled and blockers:
+            # Why checkout stopped comes first, so it never reads like the plain cart view again.
+            reason = "⚠️ Can’t place this order yet:\n" + "\n".join(blockers)
+            card = self._cart_card(cart, reason + "\n\nIn your cart:", buttons, [deliver],
+                                   fallback=reason + "\n\n" + "\n".join(lines))
+            if card:
+                return [card]
+            body = reason + "\n\n" + "\n".join(lines)
+            return [self._prompt(body, buttons)] if len(body) <= 1024 else messages + [self._prompt(reason, buttons)]
+        intro = "🧾 Ready to order. Please check and choose how to pay:" if buttons else "🛒 These are your cart items:"
+        card = self._cart_card(cart, intro, buttons, [deliver, *closing], fallback="\n".join(lines + closing))
         if card:
             return [card]
         if not buttons:
             return messages + ["\n".join(closing)]
-        if blockers:
-            return messages + [self._prompt("\n".join(closing), buttons)]
         messages.append(self._prompt(
             f"Ready to order these {len(cart['items'])} item(s) for {_money(total)}. " + "\n".join(closing), buttons[:3]))
         return messages
@@ -686,20 +695,29 @@ class CheckoutFlow:
 
     @staticmethod
     def _breakup_lines(cart: dict) -> list[str]:
-        """Items, savings and every charge, ending with the total; no fee is ever hidden."""
+        """Items, savings and every charge, ending with the total; no fee is ever hidden or invented."""
         raw = {entry["name"]: entry["amount"] for entry in cart.get("price_breakup", {}).get("raw", [])}
         charges = {"delivery_charge": "Delivery", "cod_charge": "Cash on delivery fee",
                    "convenience_fee": "Convenience fee"}
         savings = {"discount": "Discount", "coupon": "Coupon"}
+        subtotal, total = raw.get("subtotal"), raw.get("total")
+        discount = raw.get("discount") or 0
+        charged = sum(raw.get(name) or 0 for name in charges) + (raw.get("coupon") or 0)
+        # JioMart's subtotal is often the selling price, MRP with the discount already taken off. Adding
+        # the discount again would invent a matching "other charge" (₹650 off, then ₹650 of fees).
+        included = bool(discount) and subtotal is not None and (
+            (raw.get("mrp_total") is not None and abs(raw["mrp_total"] + discount - subtotal) < 0.5)
+            or (total is not None and abs(subtotal + charged - total) < 0.5
+                and abs(subtotal + discount + charged - total) >= 0.5))
         rows = []
-        if raw.get("subtotal") is not None:
-            rows.append(f"Items: {_money(raw['subtotal'])}")
-        rows.extend(f"{label}: {_money(raw[name])}" for name, label in savings.items() if raw.get(name))
+        if subtotal is not None:
+            rows.append(f"Items: {_money(subtotal)}" + (f" (you save {_money(-discount)})" if included else ""))
+        rows.extend(f"{label}: {_money(raw[name])}" for name, label in savings.items()
+                    if raw.get(name) and not (name == "discount" and included))
         rows.extend(f"{label}: {_money(raw[name])}" for name, label in charges.items() if raw.get(name))
-        total = raw.get("total")
-        if total is not None and raw.get("subtotal") is not None:
+        if total is not None and subtotal is not None:
             # JioMart also adds charges under names we don't map (handling, small-cart fees, …).
-            explained = raw["subtotal"] + sum(raw.get(n) or 0 for n in (*savings, *charges))
+            explained = subtotal + charged + (0 if included else discount)
             other = round(total - explained, 2)
             if other >= 0.5:
                 rows.append(f"Delivery & other charges: {_money(other)}")
