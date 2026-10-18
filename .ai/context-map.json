@@ -1,0 +1,336 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "path": ".ai/agents.md",
+      "sources": [
+        "README.md",
+        "pyproject.toml",
+        "smartbazaar/**",
+        "tests/**",
+        "docs/project-status.md",
+        "docs/technical-prd.md",
+        "docs/agent-architecture.md",
+        "docs/agent-api-map.md",
+        "scripts/**",
+        "docs/operations-reliability.md",
+        "docs/product-polish-backlog.md",
+        "docs/architecture/decisions/0005-agentic-reply-composition.md",
+        "docs/architecture/decisions/0006-jiomart-cart-is-the-only-basket.md",
+        "docs/whatsapp-reply-formats.md"
+      ],
+      "related": [
+        ".ai/README.md",
+        ".ai/modules/login-search-poc.md",
+        ".ai/modules/project-documents.md",
+        ".ai/features/whatsapp-login-search.md",
+        ".ai/architecture/module-interactions.md",
+        ".ai/architecture/data-model.md"
+      ]
+    },
+    {
+      "path": ".ai/README.md",
+      "sources": [],
+      "related": [
+        ".ai/agents.md",
+        ".ai/modules/login-search-poc.md",
+        ".ai/modules/project-documents.md"
+      ]
+    },
+    {
+      "path": ".ai/modules/login-search-poc.md",
+      "sources": [
+        "smartbazaar/**",
+        "tests/**",
+        "pyproject.toml",
+        "README.md",
+        "docs/project-status.md",
+        "docs/whatsapp-agent-experience-plan.md",
+        "docs/agent-architecture.md",
+        "docs/agent-api-map.md",
+        "scripts/**",
+        "docs/operations-reliability.md",
+        "docs/architecture/decisions/0004-real-cart-checkout-and-order-updates.md",
+        "docs/architecture/decisions/0005-agentic-reply-composition.md",
+        "docs/whatsapp-reply-formats.md",
+        "docs/product-polish-backlog.md",
+        "docs/architecture/decisions/0006-jiomart-cart-is-the-only-basket.md"
+      ],
+      "related": [
+        ".ai/features/whatsapp-login-search.md",
+        ".ai/patterns/webhook-state-safety.md",
+        ".ai/patterns/bounded-external-adapters.md",
+        ".ai/architecture/module-interactions.md",
+        ".ai/architecture/data-model.md"
+      ]
+    },
+    {
+      "path": ".ai/modules/project-documents.md",
+      "sources": [
+        "docs/**",
+        "README.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".gitignore",
+        "smartbazaar/**",
+        "tests/**",
+        "pyproject.toml"
+      ],
+      "related": [
+        ".ai/agents.md",
+        ".ai/README.md",
+        ".ai/modules/login-search-poc.md",
+        ".ai/architecture/module-interactions.md"
+      ]
+    },
+    {
+      "path": ".ai/features/whatsapp-login-search.md",
+      "sources": [
+        "smartbazaar/app.py",
+        "smartbazaar/conversation.py",
+        "smartbazaar/agent.py",
+        "smartbazaar/catalog.py",
+        "smartbazaar/jiomart.py",
+        "smartbazaar/storage.py",
+        "smartbazaar/whatsapp.py",
+        "tests/**",
+        "docs/whatsapp-agent-experience-plan.md",
+        "docs/project-status.md",
+        "smartbazaar/openwa.py",
+        "smartbazaar/config.py",
+        "tests/test_openwa.py",
+        "docs/openwa-poc.md",
+        "smartbazaar/memory.py",
+        "smartbazaar/tools.py",
+        "smartbazaar/media.py",
+        "tests/test_shopping_tools.py",
+        "tests/test_media.py",
+        "tests/test_commerce_tools.py",
+        "docs/agent-architecture.md",
+        "docs/agent-api-map.md",
+        "smartbazaar/channel_health.py",
+        "tests/test_channel_health.py",
+        "docs/operations-reliability.md",
+        "smartbazaar/checkout.py",
+        "smartbazaar/orders.py",
+        "smartbazaar/order_watch.py",
+        "tests/test_checkout.py",
+        "tests/test_checkout_conversation.py",
+        "tests/test_orders.py",
+        "tests/test_order_watch.py",
+        "docs/architecture/decisions/0004-real-cart-checkout-and-order-updates.md",
+        "smartbazaar/composer.py",
+        "smartbazaar/cart_image.py",
+        "tests/test_composer.py",
+        "tests/test_cart_card.py",
+        "docs/architecture/decisions/0005-agentic-reply-composition.md",
+        "docs/whatsapp-reply-formats.md",
+        "smartbazaar/receipt.py",
+        "smartbazaar/session_keepalive.py",
+        "smartbazaar/privacy.py",
+        "tests/test_session_keepalive.py",
+        "tests/test_order_actions.py",
+        "docs/architecture/decisions/0006-jiomart-cart-is-the-only-basket.md"
+      ],
+      "related": [
+        ".ai/modules/login-search-poc.md",
+        ".ai/architecture/module-interactions.md",
+        ".ai/patterns/webhook-state-safety.md",
+        ".ai/patterns/bounded-external-adapters.md"
+      ]
+    },
+    {
+      "path": ".ai/patterns/webhook-state-safety.md",
+      "sources": [
+        "smartbazaar/app.py",
+        "smartbazaar/storage.py",
+        "smartbazaar/whatsapp.py",
+        "smartbazaar/openwa.py",
+        "smartbazaar/config.py",
+        "tests/test_openwa.py",
+        "docs/openwa-poc.md",
+        "smartbazaar/conversation.py",
+        "tests/test_whatsapp.py",
+        "docs/whatsapp-reply-formats.md",
+        "smartbazaar/memory.py",
+        "smartbazaar/tools.py",
+        "smartbazaar/media.py",
+        "tests/test_shopping_tools.py",
+        "tests/test_media.py",
+        "tests/test_commerce_tools.py",
+        "docs/agent-architecture.md",
+        "docs/agent-api-map.md",
+        "smartbazaar/channel_health.py",
+        "tests/test_channel_health.py",
+        "docs/operations-reliability.md",
+        "smartbazaar/checkout.py",
+        "smartbazaar/orders.py",
+        "smartbazaar/order_watch.py",
+        "tests/test_checkout.py",
+        "tests/test_checkout_conversation.py",
+        "tests/test_orders.py",
+        "tests/test_order_watch.py",
+        "smartbazaar/cart_image.py",
+        "tests/test_cart_card.py",
+        "smartbazaar/session_keepalive.py",
+        "tests/test_session_keepalive.py",
+        "docs/architecture/decisions/0006-jiomart-cart-is-the-only-basket.md"
+      ],
+      "related": [
+        ".ai/modules/login-search-poc.md",
+        ".ai/features/whatsapp-login-search.md",
+        ".ai/patterns/bounded-external-adapters.md"
+      ]
+    },
+    {
+      "path": ".ai/patterns/bounded-external-adapters.md",
+      "sources": [
+        "smartbazaar/agent.py",
+        "smartbazaar/catalog.py",
+        "smartbazaar/jiomart.py",
+        "tests/test_agent.py",
+        "tests/test_catalog.py",
+        "tests/test_jiomart.py",
+        "smartbazaar/openwa.py",
+        "smartbazaar/config.py",
+        "tests/test_openwa.py",
+        "docs/openwa-poc.md",
+        "smartbazaar/whatsapp.py",
+        "smartbazaar/conversation.py",
+        "tests/test_whatsapp.py",
+        "docs/whatsapp-reply-formats.md",
+        "smartbazaar/memory.py",
+        "smartbazaar/tools.py",
+        "smartbazaar/media.py",
+        "smartbazaar/storage.py",
+        "tests/test_shopping_tools.py",
+        "tests/test_media.py",
+        "tests/test_commerce_tools.py",
+        "docs/agent-architecture.md",
+        "docs/agent-api-map.md",
+        "smartbazaar/channel_health.py",
+        "tests/test_channel_health.py",
+        "docs/operations-reliability.md",
+        "smartbazaar/checkout.py",
+        "smartbazaar/orders.py",
+        "smartbazaar/order_watch.py",
+        "tests/test_checkout.py",
+        "tests/test_checkout_conversation.py",
+        "tests/test_orders.py",
+        "tests/test_order_watch.py",
+        "smartbazaar/composer.py",
+        "smartbazaar/cart_image.py",
+        "tests/test_composer.py",
+        "tests/test_cart_card.py",
+        "docs/architecture/decisions/0005-agentic-reply-composition.md",
+        "smartbazaar/receipt.py",
+        "smartbazaar/session_keepalive.py",
+        "tests/test_session_keepalive.py",
+        "tests/test_order_actions.py"
+      ],
+      "related": [
+        ".ai/modules/login-search-poc.md",
+        ".ai/features/whatsapp-login-search.md",
+        ".ai/patterns/webhook-state-safety.md"
+      ]
+    },
+    {
+      "path": ".ai/architecture/module-interactions.md",
+      "sources": [
+        "smartbazaar/**",
+        "docs/technical-prd.md",
+        "docs/project-status.md",
+        "docs/whatsapp-agent-experience-plan.md",
+        "docs/agent-architecture.md",
+        "docs/agent-api-map.md",
+        "scripts/**",
+        "docs/operations-reliability.md",
+        "docs/architecture/decisions/0004-real-cart-checkout-and-order-updates.md",
+        "docs/architecture/decisions/0005-agentic-reply-composition.md",
+        "docs/architecture/decisions/0006-jiomart-cart-is-the-only-basket.md"
+      ],
+      "related": [
+        ".ai/agents.md",
+        ".ai/features/whatsapp-login-search.md",
+        ".ai/modules/login-search-poc.md",
+        ".ai/architecture/data-model.md"
+      ]
+    },
+    {
+      "path": ".ai/architecture/data-model.md",
+      "sources": [
+        "smartbazaar/storage.py",
+        "smartbazaar/app.py",
+        "smartbazaar/conversation.py",
+        "smartbazaar/memory.py",
+        "smartbazaar/tools.py",
+        "smartbazaar/media.py",
+        "tests/test_shopping_tools.py",
+        "tests/test_media.py",
+        "tests/test_commerce_tools.py",
+        "docs/agent-architecture.md",
+        "docs/agent-api-map.md",
+        "smartbazaar/checkout.py",
+        "smartbazaar/orders.py",
+        "smartbazaar/order_watch.py",
+        "tests/test_checkout.py",
+        "tests/test_checkout_conversation.py",
+        "tests/test_orders.py",
+        "tests/test_order_watch.py",
+        "smartbazaar/receipt.py",
+        "smartbazaar/session_keepalive.py",
+        "tests/test_session_keepalive.py",
+        "docs/architecture/decisions/0006-jiomart-cart-is-the-only-basket.md"
+      ],
+      "related": [
+        ".ai/agents.md",
+        ".ai/modules/login-search-poc.md",
+        ".ai/architecture/module-interactions.md"
+      ]
+    }
+  ],
+  "source_roots": [
+    "docs",
+    "smartbazaar",
+    "tests",
+    "README.md",
+    "pyproject.toml",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".gitignore",
+    "scripts"
+  ],
+  "ignore": [
+    ".agents/**",
+    ".git/**",
+    "work/**",
+    ".venv/**",
+    "__pycache__/**"
+  ],
+  "excluded_sources": [
+    {
+      "pattern": "docs/reference/*.pdf",
+      "reason": "Original binary evidence; linked from docs/reference/README.md and not executable source."
+    },
+    {
+      "pattern": "docs/reference/*.png",
+      "reason": "Original screenshot evidence; linked from docs/reference/README.md and not executable source."
+    },
+    {
+      "pattern": ".env",
+      "reason": "Private local configuration; never map or read secret values."
+    }
+  ],
+  "bootstrap": {
+    "completed_steps": [
+      "0",
+      "1",
+      "1.5",
+      "2",
+      "3",
+      "4"
+    ],
+    "skipped_steps": {},
+    "omitted_artifacts": {}
+  }
+}

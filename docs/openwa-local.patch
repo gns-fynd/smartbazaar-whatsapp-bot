@@ -1,0 +1,116 @@
+diff --git a/src/main.ts b/src/main.ts
+index 1ab2bb4..aefe67a 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -254,7 +254,8 @@ async function bootstrap() {
+   );
+ 
+   const port = process.env.PORT || 2785;
+-  await app.listen(port);
++  const bindHost = process.env.BIND_HOST?.trim() || '127.0.0.1';
++  await app.listen(port, bindHost);
+ 
+   // Advertise the configured public URL, matching the AuthService banner (auth.service.ts). A bare
+   // `localhost` literal here contradicted that banner and read as "the UI is pinned to localhost",
+diff --git a/src/modules/message/entities/message.entity.ts b/src/modules/message/entities/message.entity.ts
+index 37ed2c2..e975ff0 100644
+--- a/src/modules/message/entities/message.entity.ts
++++ b/src/modules/message/entities/message.entity.ts
+@@ -1,6 +1,7 @@
+ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index, ValueTransformer } from 'typeorm';
+ import { jsonColumnType } from '../../../common/utils/column-types';
+ import { NulFreeTransformer } from '../../../common/transformers/nul-free.transformer';
++import { PocPrivacyMessageBodyTransformer } from '../../../config/poc-privacy';
+ 
+ /**
+  * A `bigint` column reads back as a string on PostgreSQL (pg avoids >2^53 precision loss) but as a
+@@ -83,7 +84,11 @@ export class Message {
+   @Column()
+   to!: string;
+ 
+-  @Column({ type: 'text', nullable: true, transformer: NulFreeTransformer })
++  @Column({
++    type: 'text',
++    nullable: true,
++    transformer: [NulFreeTransformer, PocPrivacyMessageBodyTransformer],
++  })
+   body!: string;
+ 
+   @Column({ default: 'text' })
+diff --git a/src/modules/webhook/webhook-delivery.service.ts b/src/modules/webhook/webhook-delivery.service.ts
+index 4eaf19d..d95b8be 100644
+--- a/src/modules/webhook/webhook-delivery.service.ts
++++ b/src/modules/webhook/webhook-delivery.service.ts
+@@ -29,6 +29,7 @@ import { HookManager } from '../../core/hooks';
+ import { ConcurrencyLimiter } from '../../common/utils/concurrency-limiter';
+ import { isWebhookBeforeResult } from '../../core/hooks/hook-results';
+ import { WILDCARD_EXCLUDED_EVENTS, subscriptionCoversEvent } from '../../common/utils/wildcard-events';
++import { isPocPrivacyMode } from '../../config/poc-privacy';
+ 
+ export interface WebhookPayload {
+   event: string;
+@@ -202,7 +203,9 @@ export class WebhookDeliveryService implements OnModuleInit, OnModuleDestroy {
+     @InjectQueue(QUEUE_NAMES.WEBHOOK)
+     private readonly webhookQueue?: Queue<WebhookJobData>,
+   ) {
+-    this.queueEnabled = configService.get<boolean>('queue.enabled', false);
++    // Redis/BullMQ necessarily persists the whole event payload. Privacy mode therefore keeps
++    // delivery on the direct HTTP path even if a saved configuration later enables the queue.
++    this.queueEnabled = !isPocPrivacyMode() && configService.get<boolean>('queue.enabled', false);
+     // Bound fan-out: cap how many webhook deliveries run CONCURRENTLY in this process. Every event and
+     // session shares this one pool, so an event matching N webhooks cannot open N outbound sockets at
+     // once. Default 16 (WEBHOOK_DISPATCH_CONCURRENCY).
+@@ -1087,7 +1090,9 @@ export class WebhookDeliveryService implements OnModuleInit, OnModuleDestroy {
+    * built from, so an operator can redrive it. Off (0) by default, which stores nothing new.
+    */
+   private keepsFailurePayload(): boolean {
+-    return this.configService.get<number>('webhook.failurePayloadRetentionHours', 0) > 0;
++    return (
++      !isPocPrivacyMode() && this.configService.get<number>('webhook.failurePayloadRetentionHours', 0) > 0
++    );
+   }
+ 
+   /** What the direct path needs from the dispatch context: the slot, the replay copy, the attempt cap. */
+diff --git a/src/modules/webhook/webhook-outbox.service.ts b/src/modules/webhook/webhook-outbox.service.ts
+index c1179a0..525f32a 100644
+--- a/src/modules/webhook/webhook-outbox.service.ts
++++ b/src/modules/webhook/webhook-outbox.service.ts
+@@ -4,6 +4,7 @@ import { And, In, IsNull, LessThan, Not, QueryDeepPartialEntity, Raw, Repository
+ import { WebhookOutboxEvent, WebhookOutboxState } from './entities/webhook-outbox-event.entity';
+ import { createLogger } from '../../common/services/logger.service';
+ import { isUniqueViolation } from '../../common/utils/db-errors';
++import { isPocPrivacyMode } from '../../config/poc-privacy';
+ 
+ const DEFAULT_OUTBOX_RETENTION_DAYS = 7;
+ 
+@@ -91,6 +92,9 @@ export class WebhookOutboxService implements OnModuleInit, OnModuleDestroy {
+    * deduplicable at the receiver.
+    */
+   async open(row: Omit<ReplayableDelivery, 'id' | 'attempts'> & { deliveryId: string }): Promise<void> {
++    // A POC OTP must reach the receiver, but must never be copied into the durable replay outbox.
++    // Delivery remains live/direct; a crash can lose it and the user can resend the message.
++    if (isPocPrivacyMode()) return;
+     try {
+       // A bare INSERT, not save(): save() wraps it in a transaction, and on SQLite's single shared
+       // connection the rollback of the unique violation expected here would also discard any other
+diff --git a/src/config/poc-privacy.ts b/src/config/poc-privacy.ts
+new file mode 100644
+--- /dev/null
++++ b/src/config/poc-privacy.ts
+@@ -0,0 +1,16 @@
++import type { ValueTransformer } from 'typeorm';
++
++/**
++ * Local-POC privacy mode. The gateway still delivers live webhook events, but it does not retain
++ * message bodies or webhook replay payloads. This trades crash recovery and local chat history
++ * content for keeping OTPs and other chat text out of durable gateway state.
++ */
++export function isPocPrivacyMode(env: NodeJS.ProcessEnv = process.env): boolean {
++  return env.OPENWA_POC_PRIVACY_MODE === 'true';
++}
++
++/** Redact message text at TypeORM's write boundary while leaving the live event object untouched. */
++export const PocPrivacyMessageBodyTransformer: ValueTransformer = {
++  to: (value: unknown) => (isPocPrivacyMode() && typeof value === 'string' ? '' : value),
++  from: (value: unknown) => value,
++};

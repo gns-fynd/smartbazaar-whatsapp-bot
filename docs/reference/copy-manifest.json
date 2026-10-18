@@ -1,0 +1,20 @@
+{
+  "copied_on": "2026-10-16",
+  "sources": [
+    {
+      "file": "docs/technical-prd.md",
+      "sha256": "b4623566c318dd9e03fd7e4f7bd046535bbd99bdcb1adc4a043b20635d383f93",
+      "bytes": 64302
+    },
+    {
+      "file": "docs/reference/Instinct_for_SmartBazaar_Bilateral_Note_2026-10-15.pdf",
+      "sha256": "ea19adda07da85c299089a00b0151bf6a429ec6dcc4955edf0ecf245b18e141b",
+      "bytes": 60157
+    },
+    {
+      "file": "docs/reference/shyam-pilot-guidance-2026-10-15.png",
+      "sha256": "d975b86a08f75de84dfc56e08ecec1254346ce1a30642fbf40e51657b784c5ef",
+      "bytes": 258919
+    }
+  ]
+}

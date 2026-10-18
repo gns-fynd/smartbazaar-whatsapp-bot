@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/gnsepili/RepoMind",
+  "commit": "a340a14482622066743352c037574651c8652745",
+  "installed_on": "2026-10-16",
+  "source_path": "skills/repo-context",
+  "installed_path": ".agents/skills/repo-context",
+  "bridges": ["AGENTS.md", "CLAUDE.md"],
+  "scope": "Portable local context skill only; no RepoMind Git history or remote copied into the application project."
+}
