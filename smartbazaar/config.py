@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     jiomart_online_payment: bool = False
     # Stable public HTTPS origin for payment links; empty asks the local ngrok agent API.
     public_base_url: str = ""
+    # Set by Render to the service's own https address; used when PUBLIC_BASE_URL is empty.
+    render_external_url: str = ""
     # Bot's WhatsApp number (digits) for the "Back to WhatsApp" button after payment.
     whatsapp_display_number: str = ""
     order_watch_interval_seconds: int = Field(default=20, ge=5, le=600)

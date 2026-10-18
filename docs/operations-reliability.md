@@ -129,3 +129,33 @@ Documents (invoices and order summaries) travel as base64 PDFs inside the encryp
 ## Credential rotation
 
 Use the dedicated Employee-role system user with access restricted to the bot's app and messaging asset. Store its generated token only in the private service configuration. Validate it with the read-only probe, restart the service after draining active work, and verify recipient delivery. Keep app secrets and the session-encryption key unchanged. A no-scheduled-expiry system token remains revocable in Meta; do not describe it as an uptime guarantee.
+
+## Render hosting — 19 October 2026
+
+The owner chose Render to move the bot off the laptop. Implemented and locally verified (the image was built and booted with dummy settings; nothing has been deployed to Render yet):
+
+- `Dockerfile` (Python 3.12 slim, dependencies from `uv.lock`, DejaVu fonts for the order-summary PDF) and `scripts/docker-entrypoint.sh`. The entrypoint makes the database directory on the mounted disk private and owned by the `app` user (uid 10001). It then starts uvicorn on `0.0.0.0:$PORT` as that user.
+- `render.yaml` Blueprint: one `starter` web service in `singapore` with a 1 GB disk at `/var/data` (`DATABASE_PATH=/var/data/bot.sqlite3`). Health check is `/healthz`, not `/readyz`: `/readyz` returns 503 on degraded channel checks, and Render would then refuse or restart a working deploy. `autoDeploy: false`. Secrets are `sync: false`, so Render asks for them in the dashboard and they are never in the repository. The non-secret flags match the live runtime: cart writes, checkout and online payment on; cancel off; no order limit.
+- Pay links: when `PUBLIC_BASE_URL` is empty, the app uses Render's own `RENDER_EXTERNAL_URL`, so no manual URL is needed and ngrok is never consulted.
+- Local check: `/healthz` 200 on Render's port, Meta webhook verification answered, process uid 10001, database files `0600` in a `0700` directory on the mounted volume, PDF font DejaVu, pay-link origin taken from `RENDER_EXTERNAL_URL`.
+
+### Constraints
+
+- **Exactly one instance.** The order watcher, session keep-alive and per-customer locks run in the process, and a Render service with a disk cannot scale out anyway. A deploy stops the old instance before starting the new one: there is a short gap, and inbound messages being processed at that moment are lost (outbound replies are persisted).
+- **Paid plan.** Free instances sleep when idle and have no disk.
+- **Region risk (unverified).** Render has no India region. JioMart may refuse requests from non-Indian IP addresses. Right after the first deploy, send LOGIN. If the OTP never arrives and the Render log shows `commerce_failed stage=begin_login status=403`, JioMart is blocking Singapore. The fix is then an India-hosted service or egress, not a code change.
+- **Data location.** Encrypted customer sessions and order records live on Render's disk in Singapore. Confirm this is acceptable to Fynd before real customers use it.
+
+### Cutover from the Mac (owner steps, in this order)
+
+1. Push the repository to GitHub (`git push`).
+2. In Render: New → Blueprint → choose `gns-fynd/smartbazaar-whatsapp-bot`. Enter the secret values from the Mac runtime's private `.env`; keep `SESSION_ENCRYPTION_KEY` the same if the database might be migrated later. Create the service and wait for the deploy to finish; `https://<service>.onrender.com/healthz` should return 200.
+3. Stop the Mac services first: `uv run python scripts/local_service.py uninstall` from the source checkout. The Mac tunnel runner re-points Meta's webhook to ngrok every time it starts, so it must be gone before step 4.
+4. Meta App Dashboard → WhatsApp → Configuration → Webhook: Callback URL `https://<service>.onrender.com/webhooks/whatsapp`, Verify token = `WEBHOOK_VERIFY_TOKEN`. Verify and save, and keep the `messages` field subscribed.
+5. On WhatsApp send LOGIN (the new database starts empty), then search and add something; `/readyz` should turn 200 once the channel check passes.
+
+The Mac database is not migrated by default: customers log in again, and earlier chat-order attempts stay on the Mac. To keep them, copy `state/bot.sqlite3` (taken with `sqlite3 … ".backup"` while the Mac app is stopped) onto the disk with Render's shell or SSH. Use the same `SESSION_ENCRYPTION_KEY`.
+
+### Deploys and rollback
+
+Deploy from the Render dashboard ("Manual Deploy") when `/healthz` shows no `processing` events and no `pending` or `sending` outbox rows, and no order is being submitted. Roll back with Render's "Rollback" to a previous deploy; the disk is kept across deploys and rollbacks.

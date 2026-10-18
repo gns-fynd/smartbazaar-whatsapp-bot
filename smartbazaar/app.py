@@ -116,7 +116,7 @@ def create_app(settings=None, commerce=None, agent=None, transport=None, media=N
                 settings.meta_phone_number_id,
                 settings.meta_graph_version,
             )
-        app.state.public_origin = public_origin(settings.public_base_url)
+        app.state.public_origin = public_origin(settings.public_base_url or settings.render_external_url)
         # Without a configured origin, ask the local tunnel itself; request headers are never trusted.
         app.state.tunnel_lookup = None if app.state.public_origin else (tunnel_lookup or ngrok_public_url)
         app.state.origin_checked = 0.0

@@ -417,3 +417,12 @@ def test_signed_guest_greeting_delivers_ai_quick_reply_without_commerce_login(tm
         card = transport.sent[0][1]
         assert card["type"] == "quick_reply" and card["body"] == "Hello from your grocery helper!"
         assert card["buttons"][0]["title"] == "Connect JioMart"
+
+
+def test_render_external_url_is_the_public_origin_when_none_is_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://smartbazaar-whatsapp-bot.onrender.com")
+    app = create_app(settings(tmp_path), commerce=FakeCommerce(), agent=FakeAgent(), transport=FakeWhatsApp(), media=FakeMedia())
+    with TestClient(app):
+        # Pay links use Render's own https address; the local ngrok agent is never consulted.
+        assert app.state.public_origin == "https://smartbazaar-whatsapp-bot.onrender.com"
+        assert app.state.tunnel_lookup is None

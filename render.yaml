@@ -1,0 +1,61 @@
+# Render Blueprint: one always-on web service with a persistent disk for the encrypted SQLite
+# database. Keep exactly one instance: the order watcher, session keep-alive and per-customer
+# locks run inside the process. Secrets use `sync: false`, so Render asks for them in the
+# dashboard; they never live in this file. See docs/operations-reliability.md (Render).
+services:
+  - type: web
+    name: smartbazaar-whatsapp-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter            # Free instances sleep when idle and have no disk.
+    region: singapore        # Closest Render region to India.
+    branch: main
+    autoDeploy: false        # Deploy deliberately: a restart drops in-memory inbound work.
+    healthCheckPath: /healthz
+    disk:
+      name: smartbazaar-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      # Secrets and identifiers: entered in the Render dashboard.
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_PHONE_NUMBER_ID
+        sync: false
+      - key: META_WABA_ID
+        sync: false
+      - key: META_APP_ID
+        sync: false
+      - key: WEBHOOK_VERIFY_TOKEN
+        sync: false
+      - key: SESSION_ENCRYPTION_KEY
+        sync: false
+      - key: ALLOWED_WHATSAPP_NUMBERS
+        sync: false
+      - key: WHATSAPP_DISPLAY_NUMBER
+        sync: false
+      # Non-secret settings, matching the live runtime on 19 October 2026.
+      - key: OPENAI_MODEL
+        value: gpt-6.1-sol
+      - key: META_GRAPH_VERSION
+        value: v25.0
+      - key: CHANNEL_PROVIDER
+        value: meta
+      - key: JIOMART_APPLICATION_ID
+        value: 685945f46c8c7aee3f3af605
+      - key: JIOMART_CART_WRITES
+        value: "true"
+      - key: JIOMART_CHECKOUT
+        value: "true"
+      - key: JIOMART_ONLINE_PAYMENT
+        value: "true"
+      - key: JIOMART_ORDER_CANCEL
+        value: "false"
+      - key: CHECKOUT_MAX_TOTAL
+        value: "0"
+      - key: DATABASE_PATH
+        value: /var/data/bot.sqlite3

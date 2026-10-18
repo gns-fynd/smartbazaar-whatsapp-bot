@@ -17,7 +17,10 @@
         "docs/product-polish-backlog.md",
         "docs/architecture/decisions/0005-agentic-reply-composition.md",
         "docs/architecture/decisions/0006-jiomart-cart-is-the-only-basket.md",
-        "docs/whatsapp-reply-formats.md"
+        "docs/whatsapp-reply-formats.md",
+        "Dockerfile",
+        ".dockerignore",
+        "render.yaml"
       ],
       "related": [
         ".ai/README.md",
@@ -54,7 +57,10 @@
         "docs/architecture/decisions/0005-agentic-reply-composition.md",
         "docs/whatsapp-reply-formats.md",
         "docs/product-polish-backlog.md",
-        "docs/architecture/decisions/0006-jiomart-cart-is-the-only-basket.md"
+        "docs/architecture/decisions/0006-jiomart-cart-is-the-only-basket.md",
+        "Dockerfile",
+        ".dockerignore",
+        "render.yaml"
       ],
       "related": [
         ".ai/features/whatsapp-login-search.md",
@@ -298,7 +304,10 @@
     "AGENTS.md",
     "CLAUDE.md",
     ".gitignore",
-    "scripts"
+    "scripts",
+    "Dockerfile",
+    ".dockerignore",
+    "render.yaml"
   ],
   "ignore": [
     ".agents/**",

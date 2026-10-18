@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+!.env.example
+.venv
+work
+logs
+**/__pycache__
+.pytest_cache
+.ruff_cache
+docs
+tests
+.ai
+.agents
+*.sqlite3
