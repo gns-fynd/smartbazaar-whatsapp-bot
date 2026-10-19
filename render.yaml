@@ -1,21 +1,24 @@
-# Render Blueprint: one always-on web service with a persistent disk for the encrypted SQLite
-# database. Keep exactly one instance: the order watcher, session keep-alive and per-customer
-# locks run inside the process. Secrets use `sync: false`, so Render asks for them in the
-# dashboard; they never live in this file. See docs/operations-reliability.md (Render).
+# Render Blueprint: one web service on the free plan. Keep exactly one instance: the order
+# watcher, session keep-alive and per-customer locks run inside the process. Secrets use
+# `sync: false`, so Render asks for them in the dashboard; they never live in this file.
+# Free plan: no disk (the encrypted SQLite database resets on every restart or deploy) and
+# the service sleeps after 15 idle minutes unless .github/workflows/keep-awake.yml pings it.
+# For a persistent database, switch to `plan: starter` and add the commented disk below.
+# See docs/operations-reliability.md (Render).
 services:
   - type: web
     name: smartbazaar-whatsapp-bot
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter            # Free instances sleep when idle and have no disk.
+    plan: free
     region: singapore        # Closest Render region to India.
     branch: main
     autoDeploy: false        # Deploy deliberately: a restart drops in-memory inbound work.
     healthCheckPath: /healthz
-    disk:
-      name: smartbazaar-data
-      mountPath: /var/data
-      sizeGB: 1
+    # disk:                  # Paid plans only: keeps sessions and orders across deploys.
+    #   name: smartbazaar-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
     envVars:
       # Secrets and identifiers: entered in the Render dashboard.
       - key: OPENAI_API_KEY

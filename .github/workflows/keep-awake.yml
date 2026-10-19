@@ -1,0 +1,24 @@
+# Render's free plan sleeps a service after 15 minutes without inbound traffic, which pauses the
+# order watcher and the JioMart sign-in keep-alive. This pings /healthz every 5 minutes.
+# Set the repository variable RENDER_HEALTH_URL (Settings → Secrets and variables → Actions →
+# Variables) to https://<service>.onrender.com/healthz; until then the job does nothing.
+name: Keep Render service awake
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    if: ${{ vars.RENDER_HEALTH_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping health endpoint
+        env:
+          URL: ${{ vars.RENDER_HEALTH_URL }}
+        # A cold start can take about a minute; a failed ping is retried on the next run.
+        run: curl --silent --show-error --output /dev/null --max-time 90 --retry 2 "$URL" || true

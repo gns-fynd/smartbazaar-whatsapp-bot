@@ -20,7 +20,8 @@
         "docs/whatsapp-reply-formats.md",
         "Dockerfile",
         ".dockerignore",
-        "render.yaml"
+        "render.yaml",
+        ".github/**"
       ],
       "related": [
         ".ai/README.md",
@@ -307,7 +308,8 @@
     "scripts",
     "Dockerfile",
     ".dockerignore",
-    "render.yaml"
+    "render.yaml",
+    ".github"
   ],
   "ignore": [
     ".agents/**",
