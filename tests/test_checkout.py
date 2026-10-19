@@ -1018,3 +1018,52 @@ async def test_no_order_limit_by_default_so_a_large_cart_can_be_paid(tmp_path):
 
     assert any(button["title"] == "Cash on delivery" for button in reply[-1]["buttons"])
     assert "limit" not in reply[-1]["body"]
+
+
+# ----- substitutes for unavailable cart lines -----
+
+
+@pytest.mark.asyncio
+async def test_find_substitutes_needs_a_finder_and_its_button_only_asks(tmp_path):
+    store = new_store(tmp_path)
+    state, memory = make_state(), make_memory()
+    account = store.memory_key(state["session"])
+    memory["cart_products"] = {str(("101", "OS")): {"id": "101", "name": "Coca Cola Zero 300 ml", "category": "Soft Drinks"}}
+    lines = [make_cart_line("101", 2, 0, "Coca Cola Zero 300 ml", 36.0, available=False),
+             make_cart_line("102", 1, 1, "Sprite 750 ml", 37.0)]
+    commerce = FakeCommerce(lines=lines)
+    flow = CheckoutFlow(store, commerce, cart_writes=True, checkout=True)
+    seen = []
+
+    async def finder(state, memory):
+        seen.append(await flow.unavailable_lines(state, memory))
+        return ["Would one of these do?"]
+
+    flow.substitutes = finder
+    review = await flow.prepare("owner", state, memory, account)
+    buttons = review[-1]["buttons"]
+
+    assert [b["title"] for b in buttons] == ["Find substitutes", "Remove unavailable", "Keep shopping"]
+    assert await flow.handle_button("owner", state, memory, account, buttons[0]["id"]) == ["Would one of these do?"]
+    # Only the unavailable line, described with what this chat already knew about it.
+    assert seen == [[{"key": "('101', 'OS')", "quantity": 2, "product": {
+        "id": "101", "name": "Coca Cola Zero 300 ml", "brand": None, "category": "Soft Drinks"}}]]
+    assert commerce.calls["add"] == [] and commerce.calls["update"] == []
+
+
+@pytest.mark.asyncio
+async def test_remove_line_takes_out_only_the_replaced_line_if_still_there(tmp_path):
+    store = new_store(tmp_path)
+    state = make_state()
+    commerce = FakeCommerce(lines=[make_cart_line("101", 2, 0, "Coca Cola Zero 300 ml", 36.0, available=False),
+                                   make_cart_line("102", 1, 1, "Sprite 750 ml", 37.0)])
+    flow = CheckoutFlow(store, commerce, cart_writes=True)
+
+    said = await flow.remove_line(state, "('101', 'OS')", "Coca Cola Zero 300 ml")
+
+    assert said == "Removed Coca Cola Zero 300 ml (unavailable) from your cart."
+    assert commerce.calls["update"][0]["operation"] == "remove_item"
+    assert [item["item_index"] for item in commerce.calls["update"][0]["items"]] == [0]
+    assert [line["name"] for line in commerce.lines] == ["Sprite 750 ml"]
+    assert await flow.remove_line(state, "('101', 'OS')", "Coca Cola Zero 300 ml") == "Coca Cola Zero 300 ml is no longer in your cart."
+    assert len(commerce.calls["update"]) == 1

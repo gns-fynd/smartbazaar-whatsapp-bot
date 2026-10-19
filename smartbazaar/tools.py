@@ -3,14 +3,23 @@
 The customer's real JioMart cart is the only basket. A request's confident matches go
 straight into it. A product that needs the customer's choice becomes a short-lived
 question (``memory["pending"]``) asked one at a time with pictures; any newer add
-request replaces those questions, so older requests never resurface.
+request replaces those questions, so older requests never resurface. A product that can't
+be bought here becomes the same kind of question, plainly labelled as a substitute: what
+the customer bought before first, then the same JioMart category. Nothing is added (or
+replaced in the cart) until the customer taps an option.
 """
 
 import secrets
 import time
 
 from .agent import AgentError
-from .catalog import normalize_products, product_matches_exact, sanitize_selection
+from .catalog import (
+    normalize_products,
+    product_is_substitute,
+    product_matches_exact,
+    same_category,
+    sanitize_selection,
+)
 from .jiomart import CommerceError
 from .memory import PENDING_TTL, PREFERENCE_TTL, canonical_query, remembered_choice
 
@@ -18,6 +27,10 @@ FOCUS_TTL = 6 * 3600
 MAX_HISTORY_ORDERS = 12
 MAX_HISTORY_DETAILS = 4
 MAX_HISTORY_ITEMS = 50
+MAX_SUBSTITUTES = 3
+MAX_SUBSTITUTE_LINES = 3
+# One extra search per unavailable product, for something the customer bought before.
+MAX_USUAL_LOOKUPS = 1
 
 
 def _cancelled(order: dict) -> bool:
@@ -30,10 +43,18 @@ def _price(value) -> str:
     return f"₹{value:g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else ""
 
 
+def _bought(memory: dict) -> dict[str, dict]:
+    """Products from the customer's own past orders, most bought first (none after FORGET)."""
+    if memory.get("history_import_disabled"):
+        return {}
+    return {str(item["id"]): item for item in memory.get("history", {}).get("items", [])
+            if isinstance(item, dict) and item.get("id") and item.get("name")}
+
+
 def _usual_first(memory: dict, products: list[dict]) -> list[dict]:
     """Put anything the customer has bought before at the top of a choice, and say so."""
-    bought = {str(item.get("id")) for item in memory.get("history", {}).get("items", []) if item.get("id")}
-    if memory.get("history_import_disabled") or not bought:
+    bought = set(_bought(memory))
+    if not bought:
         return products
     marked = [{**product, "usual": True} if str(product.get("id")) in bought else product for product in products]
     return sorted(marked, key=lambda product: not product.get("usual"))
@@ -166,12 +187,21 @@ class ShoppingTools:
         tokens = {"sbch_" + secrets.token_urlsafe(12): i for i in range(len(products))}
         skip = "sbch_" + secrets.token_urlsafe(12)
         pending["tokens"] = {**tokens, skip: -1}
-        lines = [f"Which {item['query']} would you like?" + (f" (1 of {len(items)} to choose)" if len(items) > 1 else "")]
+        count = f" (1 of {len(items)} to choose)" if len(items) > 1 else ""
+        # A substitute question says plainly that the product asked for can't be had.
+        substitute = item.get("substitute") if isinstance(item.get("substitute"), dict) else None
+        if substitute:
+            lines = [f"{substitute['note']} Would one of these do?{count}"]
+            action = "replace it in your cart" if substitute.get("replaces") else "add it to your cart instead"
+            skip_note = "Leave your cart as it is" if substitute.get("replaces") else "Don’t add a substitute"
+        else:
+            lines = [f"Which {item['query']} would you like?{count}"]
+            action, skip_note = "add it to your cart", f"Don’t add {item['query']}"
         for i, product in enumerate(products, 1):
             detail = " · ".join(part for part in (product.get("pack") or "", _price(product.get("price"))) if part)
             lines.append(f"{i}. {product['name']}" + (f" — {detail}" if detail else "")
                          + (" (you've bought this before)" if product.get("usual") else ""))
-        lines.append("Tap a number to add it to your cart" + (", or Skip." if len(products) < 3 else ", or say ‘skip’."))
+        lines.append(f"Tap a number to {action}" + (", or Skip." if len(products) < 3 else ", or say ‘skip’."))
         body = "\n".join(lines)[:1024]
         buttons = [{"id": token, "title": _short_label(i + 1, products[i])} for token, i in tokens.items()]
         if len({b["title"] for b in buttons}) < len(buttons):
@@ -184,7 +214,7 @@ class ShoppingTools:
             detail = " · ".join(part for part in (_price(product.get("price")), product.get("pack") or "",
                                                   product.get("brand") or "") if part)
             rows.append({"id": token, "title": product["name"][:24], "description": (detail or product["name"])[:72]})
-        rows.append({"id": skip, "title": "Skip this item", "description": f"Don’t add {item['query']}"[:72]})
+        rows.append({"id": skip, "title": "Skip this item", "description": skip_note[:72]})
         fallback = body + "\nReply ‘choose 1’ (or another number), or ‘skip’."
         menu = {"type": "list", "body": body, "button": "Choose", "rows": rows, "fallback": fallback}
         if not all(isinstance(p.get("image_url"), str) for p in products):
@@ -263,7 +293,11 @@ class ShoppingTools:
             return ["There’s nothing waiting for a choice. Tell me what you’d like to buy."]
         skipped = items.pop(0)
         prompt = self.next_choice(memory, state)
-        return [f"Skipped {skipped['query']}."] + ([prompt] if prompt else [])
+        if (skipped.get("substitute") or {}).get("replaces"):
+            said = f"No substitute for {skipped['query']}. It stays in your cart, marked unavailable."
+        else:
+            said = f"Skipped {skipped['query']}."
+        return [said] + ([prompt] if prompt else [])
 
     async def _choose(self, intent, state, memory) -> list:
         pending = memory.get("pending") or {}
@@ -278,8 +312,14 @@ class ShoppingTools:
             prompt = self.next_choice(memory, state)
             return ["That choice is from an earlier request."] + ([prompt] if prompt else [])
         item = items.pop(0)
-        product = item["products"][index]
-        replies = await self._receipt(state, memory, [{"product": product, "quantity": item["quantity"]}])
+        lines = [{"product": item["products"][index], "quantity": item["quantity"]}]
+        result = await self.cart.add_products(state, memory, lines)
+        replies = self._said(result, lines)
+        replaces = (item.get("substitute") or {}).get("replaces")
+        if replaces and not result["error"] and (result["added"] or result["already"]):
+            # The tapped substitute is in the cart, so only now does the unavailable line go.
+            removed = await self.cart.remove_line(state, replaces, item["query"])
+            replies = ["\n".join([*replies, removed])]
         prompt = self.next_choice(memory, state)
         return replies + ([prompt] if prompt else [])
 
@@ -301,21 +341,21 @@ class ShoppingTools:
             query = canonical_query(item.query)
             preference = remembered_choice(memory, query, time.time())
             search_query = preference["product"]["name"] if preference else query
-            by_id: dict = {}
+            products, safe = [], None
             try:
                 result = await self.commerce.search(search_query, state["location"], state["session"])
                 products = normalize_products(result.get("items", []))
                 ranked = await self.agent.rank(query, products) if products else None
                 safe = sanitize_selection(query, products, ranked) if ranked else None
-                by_id = {p["id"]: p for p in products if p.get("sellable") is not False}
-                exact = [by_id[i] for i in safe.exact_ids if i in by_id] if safe else []
-                alternatives = [by_id[i] for i in safe.alternative_ids if i in by_id] if safe else []
             except CommerceError as exc:
                 if exc.code == "auth_expired":
                     raise
-                exact, alternatives = [], []
+                products = []
             except AgentError:
-                exact, alternatives = [], []
+                # Without a ranking nothing is known to match, so nothing is offered either.
+                products = []
+            by_id = {p["id"]: p for p in products if p.get("sellable") is not False}
+            exact = [by_id[i] for i in safe.exact_ids if i in by_id] if safe else []
             chosen = None
             if preference:
                 usual = by_id.get(preference["product"]["id"])
@@ -328,11 +368,18 @@ class ShoppingTools:
                 chosen = exact[0]
             if chosen:
                 confident.append({"product": chosen, "quantity": item.quantity})
-            elif exact or alternatives:
-                questions.append({"query": query, "quantity": item.quantity,
-                                  "products": _usual_first(memory, (exact or alternatives)[:3])})
-            else:
-                missing.append(query)
+                continue
+            wanted, note = self._unavailable(products, safe, preference)
+            options = _usual_first(memory, exact[:3]) if exact else await self._substitutes(
+                state, memory, query, products, wanted, safe.alternative_ids if safe else [])
+            if not options:
+                missing.append((query, note))
+                continue
+            question = {"query": query, "quantity": item.quantity, "products": options}
+            if note or not exact:
+                # No sellable exact match (or not their usual): say so, never present it as the same thing.
+                question["substitute"] = {"note": note or f"I couldn’t find “{query}” near you."}
+            questions.append(question)
         # The newest request wins: older unanswered questions are dropped, never carried forward.
         memory.pop("pending", None)
         if questions:
@@ -340,16 +387,127 @@ class ShoppingTools:
                                  "expires": time.time() + PENDING_TTL}
         memory.setdefault("active", {})["queries"] = [canonical_query(i.query) for i in intent.items]
         replies = await self._receipt(state, memory, confident, why) if confident else []
-        for query in missing:
-            replies.append(f"I couldn’t find a clear match for “{query}” near you. Tell me a brand or pack size and I’ll look again.")
+        for query, note in missing:
+            if note:
+                replies.append(f"{note} I didn’t find a close substitute, so nothing was added. "
+                               "Tell me another brand or pack size and I’ll look again.")
+            else:
+                replies.append(f"I couldn’t find a clear match for “{query}” near you. Tell me a brand or pack size and I’ll look again.")
         prompt = self.next_choice(memory, state)
         if prompt:
             replies.append(prompt)
         return replies
 
+    @staticmethod
+    def _unavailable(products: list[dict], safe, preference) -> tuple[dict | None, str | None]:
+        """The product the customer meant that can't be bought here, and how to say so.
+
+        Only JioMart's own listing marked not sellable is called unavailable; a product the
+        search didn't return is “couldn’t find”, because a search miss isn't a stock fact.
+        """
+        listed = {p["id"]: p for p in products}
+        if preference:
+            usual = preference["product"]
+            product = listed.get(str(usual.get("id")))
+            if product is None and usual.get("name"):
+                return usual, f"I couldn’t find your usual {usual['name']} near you."
+            if product is not None and product.get("sellable") is False:
+                return product, f"Your usual {product['name']} is unavailable."
+        for product_id in safe.exact_ids if safe else []:
+            product = listed.get(product_id)
+            if product is not None and product.get("sellable") is False:
+                return product, f"{product['name']} is unavailable."
+        return None, None
+
+    async def _substitutes(self, state, memory, query, products, wanted=None, ranked=()) -> list[dict]:
+        """Up to three products that could stand in for one the customer can't have here.
+
+        Each passes the deterministic substitute gate. Something bought before comes first
+        (looked up by name once when this search didn't return it), then the unavailable
+        product's own JioMart category, then the model's alternatives, then search order.
+        """
+        bought = _bought(memory)
+        ranked = set(ranked)
+        pool = {p["id"]: p for p in products if p.get("sellable") is not False}
+
+        def fits(product):
+            return product_is_substitute(query, product, wanted, ranked=product["id"] in ranked)
+
+        if not any(pid in bought and fits(product) for pid, product in pool.items()):
+            lookups = [item for pid, item in bought.items()
+                       if pid not in pool and product_is_substitute(query, item, wanted)][:MAX_USUAL_LOOKUPS]
+            for item in lookups:
+                try:
+                    result = await self.commerce.search(item["name"], state["location"], state["session"])
+                except CommerceError as exc:
+                    if exc.code == "auth_expired":
+                        raise
+                    continue
+                # The same catalog ID only, still sellable here; never a lookalike of it.
+                match = next((p for p in normalize_products(result.get("items", []))
+                              if p["id"] == item["id"] and p.get("sellable") is not False), None)
+                if match:
+                    pool[match["id"]] = match
+        options = [product for product in pool.values() if fits(product)]
+        options.sort(key=lambda p: (p["id"] not in bought, not (wanted and same_category(wanted, p)),
+                                    p["id"] not in ranked))
+        return _usual_first(memory, options[:MAX_SUBSTITUTES])
+
+    async def cart_substitutes(self, state: dict, memory: dict) -> list:
+        """Substitutes for the cart's unavailable lines, asked one line at a time.
+
+        A tap adds that product and only then removes the unavailable line it replaces;
+        Skip leaves the cart as it is. Like any add request, this replaces older questions.
+        """
+        if not getattr(self.cart, "cart_writes", False):
+            return ["Changing your JioMart cart from chat isn’t switched on yet. You can do it in the JioMart app."]
+        if not state.get("location"):
+            return ["Choose a delivery address first with ADDRESSES."]
+        lines = await self.cart.unavailable_lines(state, memory)
+        if not lines:
+            return ["Nothing in your JioMart cart is marked unavailable right now. Send CHECKOUT to review it."]
+        await self.refresh_history(state, memory)
+        questions, nothing = [], []
+        for line in lines[:MAX_SUBSTITUTE_LINES]:
+            wanted = line["product"]
+            try:
+                result = await self.commerce.search(wanted["name"], state["location"], state["session"])
+                products = normalize_products(result.get("items", []))
+            except CommerceError as exc:
+                if exc.code == "auth_expired":
+                    raise
+                products = []
+            # JioMart's own listing of the unavailable product names its category.
+            listed = next((p for p in products if p["id"] == wanted["id"]), None)
+            if listed and not wanted.get("category"):
+                wanted = {**wanted, "category": listed.get("category")}
+            options = await self._substitutes(state, memory, wanted["name"], products, wanted)
+            if options:
+                questions.append({"query": wanted["name"], "quantity": line["quantity"], "products": options,
+                                  "substitute": {"note": f"{wanted['name']} is unavailable.", "replaces": line["key"]}})
+            else:
+                nothing.append(wanted["name"])
+        memory.pop("pending", None)
+        if questions:
+            memory["pending"] = {"items": questions, "pincode": state["location"].get("pincode"),
+                                 "expires": time.time() + PENDING_TTL}
+        replies: list = []
+        if nothing:
+            replies.append("I couldn’t find a close substitute for " + ", ".join(nothing)
+                           + ". Send ‘remove unavailable items’ to take it out of your cart.")
+        if len(lines) > MAX_SUBSTITUTE_LINES:
+            replies.append(f"{len(lines) - MAX_SUBSTITUTE_LINES} more unavailable item(s) are left; "
+                           "send ‘find substitutes’ again after these.")
+        prompt = self.next_choice(memory, state)
+        return replies + ([prompt] if prompt else [])
+
     async def _receipt(self, state, memory, lines, why=None) -> list[str]:
         """Add to the real cart and say exactly what happened."""
         result = await self.cart.add_products(state, memory, lines)
+        return self._said(result, lines, why)
+
+    @staticmethod
+    def _said(result: dict, lines: list[dict], why=None) -> list[str]:
         if result["error"]:
             return [result["error"]]
         why = why or {}

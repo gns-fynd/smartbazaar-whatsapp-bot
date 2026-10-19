@@ -135,3 +135,31 @@ A failed document send falls back to its text, which points to My Orders in the 
 **Voice replies.** A reply to a voice note starts with "🎤 “<transcript, up to 300 characters>”" so a mis-heard note is obvious; it is joined to the first text reply when short enough, otherwise sent first.
 
 **Order pushes.** The cancelled push now reads "❌ Order X is cancelled." with a refund note for online orders. The online payment push and the Delivered push may be followed by the documents above.
+
+## 19 October 2026: substitutes for unavailable products
+
+Implemented and locally tested; not deployed or verified in WhatsApp yet (see [status](project-status.md)). The problem statement asks the agent to "surface personalised substitutions based on purchase history". This supersedes the review-button description above where they differ.
+
+**When an add finds no sellable exact match.** The question uses the same picture choice or tap menu as any other product question, but its first line says plainly that it is a substitute:
+
+| Situation | First line |
+|---|---|
+| JioMart lists the exact product but marks it not sellable | "Amul Masti Dahi 400 g is unavailable. Would one of these do?" |
+| The customer's usual product is listed but not sellable (other exact matches remain) | "Your usual Amul Masti Dahi 400 g is unavailable. Would one of these do?" |
+| The usual product didn't come back from its own name search | "I couldn’t find your usual Amul Masti Dahi 400 g near you. Would one of these do?" |
+| Nothing exact was found | "I couldn’t find “amul masti curd 400 g” near you. Would one of these do?" |
+
+Only a listing marked not sellable is called "unavailable"; a search miss is never described as a stock fact. The lines list up to three options as usual (name, pack, price, and "(you've bought this before)"), then "Tap a number to add it to your cart instead, or Skip." The menu's Skip row reads "Don’t add a substitute". Nothing is added until the customer taps an option. If no option passes the checks, the reply is "Amul Masti Dahi 400 g is unavailable. I didn’t find a close substitute, so nothing was added. Tell me another brand or pack size and I’ll look again."
+
+**Which options.** At most three. Anything the customer has bought before (from their own JioMart orders, or an order placed from this chat) comes first. When the search didn't return it, the bot looks up one such product by name. Products in the unavailable product's own JioMart category come next, then the model's alternatives, then search order. Every option passes `catalog.product_is_substitute`: the existing relevance check (no keychains or syrup, milk only from dairy, the Diet Coke rule), any requested diet/zero/sugar-free formulation, a different product, and the same kind. "Same kind" means JioMart's own category when both listings have one, so butter is never offered for dahi. Otherwise the requested product noun must be the option's own noun or appear in its category, so "Amul Milk Chocolate" is never offered for milk.
+
+**At checkout.** A blocked review with unavailable lines now says "N item(s) can’t be delivered right now. Find substitutes for them, or remove them first." Its buttons are **Find substitutes · Remove unavailable · Keep shopping**; Empty cart drops off because a message holds three buttons. EMPTY CART still works as text. The CART text hint adds ‘find substitutes’. Find substitutes (also typed: "find substitutes", "substitutes", "find alternatives") searches each unavailable line by its name, at most three lines, and asks about one line at a time:
+
+> Amul Fruit & Nut Dark Chocolate 150 g is unavailable. Would one of these do?
+> 1. Cadbury Dairy Milk Silk Chocolate Bar 60 g — 60 g · ₹80 (you've bought this before)
+> 2. Cadbury Dairy Milk Fruit & Nut Chocolate 80 g — 80 g · ₹95
+> Tap a number to replace it in your cart, or Skip.
+
+The Skip row reads "Leave your cart as it is". A tap adds the chosen product and, only once it is in the cart, removes that one unavailable line: "🛒 Added to your JioMart cart: • 1 × … / Removed Amul Fruit & Nut Dark Chocolate 150 g (unavailable) from your cart." The substitute takes the unavailable line's quantity. Skip replies "No substitute for X. It stays in your cart, marked unavailable." Lines without a close option are named in one message that points to ‘remove unavailable items’. "Nothing in your JioMart cart is marked unavailable right now." answers a request when no line is unavailable.
+
+**Guards kept.** The Find substitutes button is an `sbco_` checkout button: single-use, account- and address-bound, 30 minutes. Option taps are `sbch_` tokens on the open question. Substitute questions are ordinary `memory["pending"]` questions, so any newer add request or Find substitutes replaces them, and an old tap gets "That choice is from an earlier request." No list exists beyond the JioMart cart.

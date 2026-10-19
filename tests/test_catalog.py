@@ -1,6 +1,12 @@
 import pytest
 
-from smartbazaar.catalog import Selection, normalize_products, render_search, sanitize_selection
+from smartbazaar.catalog import (
+    Selection,
+    normalize_products,
+    product_is_substitute,
+    render_search,
+    sanitize_selection,
+)
 
 
 def test_diet_coke_results_reject_variants_and_merchandise():
@@ -123,3 +129,33 @@ def test_exact_gate_preserves_brand_formulation_and_explicit_size(
 def test_generic_products_and_decimal_sizes(query, name, expected):
     p = {"id": "1", "name": name}
     assert bool(sanitize_selection(query, [p], Selection(exact_ids=["1"])).exact_ids) is expected
+
+
+MASTI = {"id": "masti", "name": "Amul Masti Dahi 400 g", "brand": "Amul", "category": "Curd"}
+
+
+def test_a_substitute_is_the_same_kind_never_a_categorical_mismatch():
+    mother = {"id": "mother", "name": "Mother Dairy Classic Curd 400 g", "brand": "Mother Dairy", "category": "Curd"}
+    butter = {"id": "butter", "name": "Amul Butter 100 g", "brand": "Amul", "category": "Butter"}
+    buttermilk = {"id": "lassi", "name": "Amul Masti Spiced Buttermilk 200 ml", "category": "Buttermilk & Lassi"}
+
+    # Known unavailable product: JioMart's own category decides, even for a model-ranked option.
+    assert product_is_substitute("amul masti dahi 400 g", mother, MASTI)
+    assert not product_is_substitute("amul masti dahi 400 g", butter, MASTI, ranked=True)
+    assert not product_is_substitute("amul masti dahi 400 g", buttermilk, MASTI)
+    assert not product_is_substitute("amul masti dahi 400 g", {**MASTI, "name": "Amul Masti Dahi 1 kg"}, MASTI)
+    # Not listed at all: the product noun must be the listing's own noun (or in its category).
+    assert product_is_substitute("amul masti dahi 400 g", {**mother, "category": None})
+    assert not product_is_substitute("amul masti dahi 400 g", {**butter, "category": None})
+    assert not product_is_substitute("milk", {"id": "c", "name": "Amul Milk Chocolate 40 g", "category": "Chocolates"})
+    assert product_is_substitute("milk", {"id": "t", "name": "Amul Taaza Toned Milk 500 ml", "category": "Milk"})
+
+
+def test_a_substitute_keeps_a_requested_formulation_and_rejects_merchandise():
+    zero = {"id": "101", "name": "Coca Cola Zero 300 ml", "category": "Soft Drinks"}
+    pepsi_zero = {"id": "p0", "name": "Pepsi Black Zero Sugar 300 ml", "brand": "Pepsi", "category": "Soft Drinks"}
+    cola = {"id": "c1", "name": "Coca Cola 750 ml", "brand": "Coca Cola", "category": "Soft Drinks"}
+
+    assert product_is_substitute("coca cola zero 300 ml", pepsi_zero, zero)
+    assert not product_is_substitute("coca cola zero 300 ml", cola, zero)
+    assert not product_is_substitute("diet coke", {"id": "k", "name": "Diet Coke Keychain"}, ranked=True)

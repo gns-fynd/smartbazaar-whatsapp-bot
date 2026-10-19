@@ -497,3 +497,118 @@ async def test_an_old_choice_button_never_discards_the_question_being_asked_now(
     assert store.get_memory(OWNER, account)["pending"]["items"][0]["query"] == "paneer"
     picked = await bot.handle(OWNER, "919000000001", "/button:" + stale[-1]["rows"][0]["id"])
     assert "• 1 × Chitale Paneer 200 g" in body(picked[0]) and second
+
+
+CHOCOLATE = "Amul Fruit & Nut Dark Chocolate 150 g"
+SHELF = {
+    CHOCOLATE: [
+        {"uid": 201, "name": CHOCOLATE, "sizes": ["OS"], "seller_id": 1, "sellable": False, "category": "Chocolates"},
+        {"uid": 601, "name": "Cadbury Dairy Milk Fruit & Nut Chocolate 80 g", "sizes": ["OS"], "seller_id": 1,
+         "sellable": True, "category": "Chocolates", "pack": "80 g", "price": {"effective": {"min": 95}}},
+        {"uid": 701, "name": "Amul Butter 100 g", "sizes": ["OS"], "seller_id": 1, "sellable": True, "category": "Butter"},
+    ],
+    "Cadbury Dairy Milk Silk Chocolate Bar 60 g": [
+        {"uid": 602, "name": "Cadbury Dairy Milk Silk Chocolate Bar 60 g", "sizes": ["OS"], "seller_id": 1, "sellable": True,
+         "category": "Chocolates", "pack": "60 g", "price": {"effective": {"min": 80}}},
+    ],
+}
+
+
+def bought_before(store, account, *items):
+    import time
+
+    store.save_memory(OWNER, account, {"history": {"status": "orders", "checked_at": time.time(), "items": [
+        {"id": item_id, "name": name, "purchased_at": time.time() - 86400, "orders": 2} for item_id, name in items]}})
+
+
+@pytest.mark.asyncio
+async def test_blocked_checkout_finds_substitutes_and_a_tap_replaces_only_that_line(store):
+    account = connected(store)
+    commerce = EditCommerce()
+    commerce.search = catalog(SHELF)
+    bought_before(store, account, ("602", "Cadbury Dairy Milk Silk Chocolate Bar 60 g"))
+    bot = conversation(store, commerce)
+
+    review = await bot.handle(OWNER, "919000000001", "checkout")
+    blocked = review[-1]
+    assert "Find substitutes for them, or remove them first." in blocked["body"]
+    assert [b["title"] for b in blocked["buttons"]] == ["Find substitutes", "Remove unavailable", "Keep shopping"]
+
+    asked = await bot.handle(OWNER, "919000000001", "/button:" + blocked["buttons"][0]["id"])
+    menu = asked[-1]
+
+    # Bought before (looked up by name) first, then the same category; butter is never offered.
+    assert menu["type"] == "list" and menu["body"].startswith(
+        f"{CHOCOLATE} is unavailable. Would one of these do?\n"
+        "1. Cadbury Dairy Milk Silk Chocolate Bar 60 g — 60 g · ₹80 (you've bought this before)\n"
+        "2. Cadbury Dairy Milk Fruit & Nut Chocolate 80 g — 80 g · ₹95\n"
+        "Tap a number to replace it in your cart, or Skip.")
+    assert [row["title"] for row in menu["rows"]][-1] == "Skip this item"
+    # Asking changes nothing in the cart.
+    assert commerce.updates == [] and len(commerce.lines) == 3
+
+    replaced = await bot.handle(OWNER, "919000000001", "/button:" + menu["rows"][0]["id"])
+
+    text = body(replaced[0])
+    assert "🛒 Added to your JioMart cart:\n• 1 × Cadbury Dairy Milk Silk Chocolate Bar 60 g" in text
+    assert f"Removed {CHOCOLATE} (unavailable) from your cart." in text
+    assert commerce.updates == [("remove_item", [("line-a", 0, 1)])]
+    assert [line["identifiers"]["product_uid"] for line in commerce.lines] == ["202", "203", "602"]
+    assert "pending" not in store.get_memory(OWNER, account)
+
+    # The button was single-use.
+    again = await bot.handle(OWNER, "919000000001", "/button:" + blocked["buttons"][0]["id"])
+    assert "expired" in body(again[0])
+
+
+@pytest.mark.asyncio
+async def test_skipping_a_substitute_leaves_the_cart_as_it_is(store):
+    connected(store)
+    commerce = EditCommerce()
+    commerce.search = catalog(SHELF)
+    bot = conversation(store, commerce)
+
+    asked = await bot.handle(OWNER, "919000000001", "find substitutes")
+    menu = asked[-1]
+    assert [row["title"] for row in menu["rows"]] == ["Cadbury Dairy Milk Fruit", "Skip this item"]
+    assert menu["rows"][-1]["description"] == "Leave your cart as it is"
+
+    skipped = await bot.handle(OWNER, "919000000001", "/button:" + menu["rows"][-1]["id"])
+
+    assert body(skipped[0]).startswith(f"No substitute for {CHOCOLATE}. It stays in your cart, marked unavailable.")
+    assert commerce.updates == [] and len(commerce.lines) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_newer_add_replaces_an_open_substitute_question(store):
+    from smartbazaar.agent import ShoppingLine
+
+    account = connected(store)
+    commerce = EditCommerce()
+    commerce.search = catalog({**SHELF, "coke zero": [COKE]})
+    agent = shop_agent(Intent(action="add", items=[ShoppingLine(query="coke zero")]))
+    bot = Conversation(store, commerce, agent, CheckoutFlow(store, commerce, cart_writes=True))
+
+    asked = await bot.handle(OWNER, "919000000001", "find substitutes")
+    await bot.handle(OWNER, "919000000001", "add a coke zero")
+    stale = await bot.handle(OWNER, "919000000001", "/button:" + asked[-1]["rows"][0]["id"])
+
+    assert "earlier request" in body(stale[0])
+    assert commerce.updates == [] and "pending" not in store.get_memory(OWNER, account)
+    assert CHOCOLATE in [line["name"] for line in commerce.lines]
+
+
+@pytest.mark.asyncio
+async def test_find_substitutes_with_nothing_unavailable_or_nothing_close(store):
+    connected(store)
+    commerce = EditCommerce()
+    commerce.search = catalog({CHOCOLATE: SHELF[CHOCOLATE][:1] + SHELF[CHOCOLATE][2:]})
+    bot = conversation(store, commerce)
+
+    none_close = await bot.handle(OWNER, "919000000001", "find substitutes")
+    assert body(none_close[0]).startswith(f"I couldn’t find a close substitute for {CHOCOLATE}.")
+
+    commerce.lines = commerce.lines[1:]
+    nothing = await bot.handle(OWNER, "919000000001", "find substitutes")
+    assert body(nothing[0]).startswith("Nothing in your JioMart cart is marked unavailable right now.")
+    assert commerce.updates == []

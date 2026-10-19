@@ -225,3 +225,13 @@ A cash-on-delivery “✅ Order placed” reply and the online “✅ Payment re
 ### Flow K: staying signed in
 
 Each JioMart request refreshes the access token first when it has 5 minutes or less left. A background loop renews stored sessions every 10 minutes (default) without extending the local 30-day session lifetime. If renewal fails, the next customer request asks for LOGIN. The current live session had already expired on 19 October, so one LOGIN is needed after the deploy.
+
+### Flow L: substitutes for unavailable products (19 October)
+
+Implemented and locally tested; not deployed or verified live.
+
+1. “Add amul masti dahi 400 g” when JioMart lists it as not sellable gets “Amul Masti Dahi 400 g is unavailable. Would one of these do?”. Up to three options follow, bought before first (“you've bought this before”), then the same JioMart category, with Skip. A product the search didn't return is “I couldn’t find …”, not “unavailable”. Nothing is added until a tap.
+2. When the customer's usual is not sellable but other exact matches exist, the choice starts “Your usual X is unavailable.”.
+3. CHECKOUT with unavailable lines shows Find substitutes · Remove unavailable · Keep shopping. Find substitutes (or typing “find substitutes”) asks about each unavailable line in turn. A tap adds the chosen product at that line's quantity, then removes only that unavailable line. Skip keeps the cart as it is.
+4. Options never cross categories (no butter for dahi, no milk chocolate for milk) and keep diet/zero/sugar-free requests. Any newer add request replaces open substitute questions.
+

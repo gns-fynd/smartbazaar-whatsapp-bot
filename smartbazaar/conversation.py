@@ -31,6 +31,8 @@ COMMANDS = {
     "track": "track 1", "addresses": "addresses", "cancel_login": "cancel", "resend_otp": "login",
 }
 ACCOUNT_ONLY = {"history", "orders", "reorder", "cart", "checkout", "track", "addresses", "search"}
+SUBSTITUTE_COMMANDS = {"find substitutes", "find substitute", "substitutes", "show substitutes",
+                       "find alternatives", "substitute unavailable items"}
 VIEWED_ADDS = {"add to cart", "add it", "add this", "add that", "add it to cart", "add this to cart",
                "add it to my cart", "add this to my cart", "buy it", "buy this", "i want this", "i'll take it"}
 # Card types whose "body" is the reply's spoken-aloud text for a voice-note reply.
@@ -55,6 +57,8 @@ class Conversation:
         self.store, self.commerce, self.agent = store, commerce, agent
         self.checkout = checkout or CheckoutFlow(store, commerce)
         self.tools = ShoppingTools(commerce, agent, self.checkout)
+        # The blocked review's "Find substitutes" button asks the shopping tools for options.
+        self.checkout.substitutes = self.tools.cart_substitutes
         self.orders = OrdersFlow(store, commerce, self.checkout)
         self.composer = Composer(agent)
         # "off" | "voice" (only for a transcribed voice note) | "always"; the caller resolves
@@ -361,6 +365,9 @@ class Conversation:
             return ["Okay, I won’t ask about those items. Your JioMart cart is unchanged."]
         chat_context = self._chat_context(state, now)
         try:
+            if lower in SUBSTITUTE_COMMANDS and not shopping_only:
+                self._last_action[owner] = "substitutes"
+                return await self.tools.cart_substitutes(state, memory)
             if chosen:
                 number = int(chosen.group(1))
                 intent = Intent(action="choose", choice_number=number if 1 <= number <= 3 else None)
@@ -637,7 +644,7 @@ class Conversation:
             return ["search", "reorder", "orders"]
         if action in {"checkout", "cart"}:
             return ["search", "cart", "orders"]
-        if action in {"add", "choose", "skip", "reorder", "cart_remove", "cart_quantity", "keep_shopping"}:
+        if action in {"add", "choose", "skip", "reorder", "cart_remove", "cart_quantity", "keep_shopping", "substitutes"}:
             return ["cart", "checkout", "search"]
         return ["search", "cart", "orders"]
 

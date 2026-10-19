@@ -285,14 +285,7 @@ def product_matches_exact(query: str, product: Mapping[str, Any]) -> bool:
         return "zero" in listing and ("coke" in listing or "coca cola" in listing)
     if "pepsi" in q and "pepsi" not in listing:
         return False
-    requested_formulations = {term for term in _FORMULATIONS if term in q}
-    sugar_free_requested = bool({"sugar free", "sugar-free", "no sugar"} & requested_formulations)
-    if sugar_free_requested and not any(
-        term in listing for term in ("sugar free", "zero sugar", "no sugar")
-    ):
-        return False
-    requested_formulations -= {"sugar free", "sugar-free", "no sugar"}
-    if any(term not in listing for term in requested_formulations):
+    if not _keeps_formulation(q, listing):
         return False
     words = [
         word
@@ -317,6 +310,89 @@ def product_matches_exact(query: str, product: Mapping[str, Any]) -> bool:
         }
     ]
     return bool(words) and all(_word_matches_listing(word, listing) for word in words)
+
+
+def _keeps_formulation(q: str, listing: str) -> bool:
+    """A requested diet/zero/sugar-free/regular formulation must appear in the listing."""
+    requested = {term for term in _FORMULATIONS if term in q}
+    sugar_free = {"sugar free", "sugar-free", "no sugar"}
+    if requested & sugar_free and not any(
+        term in listing for term in ("sugar free", "zero sugar", "no sugar")
+    ):
+        return False
+    return all(term in listing for term in requested - sugar_free)
+
+
+# Words that never name what a product is: sizes, packaging and request filler.
+_NOT_KINDS = {
+    "order", "please", "want", "need", "some", "with", "for", "the", "and", "pack", "of", "ml", "gm",
+    "gms", "kg", "pc", "pcs", "piece", "pieces", "diet", "zero", "sugar", "free", "no", "regular", "new",
+    "fresh", "combo", "pouch", "bottle", "can", "cup", "tub", "jar", "box", "packet", "carton", "bar",
+}
+
+
+def _kind(text: str) -> str | None:
+    """The product noun, usually the last plain word: “Amul Masti Dahi 400 g” → ``curd``."""
+    words = [
+        word for word in _normal(text).split()
+        if len(word) > 1 and not any(char.isdigit() for char in word) and word not in _NOT_KINDS
+    ]
+    return words[-1] if words else None
+
+
+def _same_word(a: str, b: str) -> bool:
+    return a == b or a + "s" == b or b + "s" == a or a + "es" == b or b + "es" == a
+
+
+def same_category(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """Both listings carry the same JioMart category (unknown never counts as the same)."""
+    first, second = _normal(_text(a.get("category"))), _normal(_text(b.get("category")))
+    return bool(first) and first == second
+
+
+def product_is_substitute(
+    query: str,
+    product: Mapping[str, Any],
+    wanted: Mapping[str, Any] | None = None,
+    *,
+    ranked: bool = False,
+) -> bool:
+    """Could ``product`` stand in for what was asked? Deterministic, like the exact gate.
+
+    ``wanted`` is the product that can't be bought (when known). A substitute passes the
+    relevance check for the request and for ``wanted``, keeps a requested formulation
+    (diet, zero, sugar-free), is a different product, and is the same kind: JioMart's own
+    category when both listings have one, otherwise the requested product noun as the
+    listing's own noun or in its category. A model-ranked alternative skips only that noun
+    test; a different category still rules it out.
+    """
+    if not product_is_relevant(query, product):
+        return False
+    listing = " ".join(
+        _normal(_text(product.get(key))) for key in ("name", "brand", "category")
+    )
+    if not _keeps_formulation(_normal(query), listing):
+        return False
+    if wanted:
+        cart = product.get("cart") if isinstance(product.get("cart"), Mapping) else {}
+        ids = {_text(product.get("id")), _text(cart.get("item_id"))} - {""}
+        if _text(wanted.get("id")) in ids:
+            return False
+        name = _text(wanted.get("name"))
+        if name and (
+            not product_is_relevant(name, product) or not _keeps_formulation(_normal(name), listing)
+        ):
+            return False
+        if _text(wanted.get("category")) and _text(product.get("category")):
+            return same_category(wanted, product)
+    if ranked:
+        return True
+    kind = _kind(query) or (_kind(_text(wanted.get("name"))) if wanted else None)
+    own = _kind(_text(product.get("name")))
+    if not kind:
+        return False
+    category = _normal(_text(product.get("category"))).split()
+    return bool(own and _same_word(kind, own)) or any(_same_word(kind, word) for word in category)
 
 
 def sanitize_selection(

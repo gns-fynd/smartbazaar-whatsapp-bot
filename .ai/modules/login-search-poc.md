@@ -191,3 +191,30 @@ Implemented and locally tested (307 tests; Ruff passes). Not deployed and not ve
 ### Tests
 
 New: `tests/test_session_keepalive.py` and `tests/test_order_actions.py`. Updated suites cover adds into the cart, open questions and their replacement/expiry, skip, picture choices and documents (`test_cart_card.py`), product links, next-step buttons, voice, proactive/cookie-only refresh and `keep_alive` (`test_jiomart.py`), cancel and invoice flows (`test_orders.py`). 307 tests pass.
+
+## 19 October 2026 — personalised substitutions
+
+Implemented and locally tested (353 tests; Ruff passes). Not pushed, deployed or verified live. See [status](../../docs/project-status.md) and [reply formats](../../docs/whatsapp-reply-formats.md). This supersedes the 19 October section above where they differ: a blocked review offers Find substitutes, and a request with no sellable exact match asks a labelled substitute question.
+
+### Key components
+
+- `catalog.product_is_substitute(query, product, wanted=None, *, ranked=False)` is the deterministic substitute gate. A product passes `product_is_relevant` for the query and for `wanted`'s name, and keeps a requested formulation (`_keeps_formulation`, now shared with `product_matches_exact`). It must not share `wanted`'s ID or cart item ID. When both listings have a category, `same_category` decides. Otherwise the requested noun (`_kind`: last word that isn't a size, number, packaging or filler, such as `bar`, `cup` or `pouch`) must be the product's own noun or a word of its category. `ranked=True` (a model alternative) skips only the noun test.
+- `ShoppingTools._add`: on no sellable exact match, `_unavailable(products, safe, preference)` returns `(wanted, note)`. `wanted` is the usual product when it is listed unsellable or wasn't returned, or the first exact ID listed unsellable. `note` is “Your usual X is unavailable.”, “I couldn’t find your usual X near you.” or “X is unavailable.”. With other sellable exact matches (the usual is gone), those become the options. Otherwise `_substitutes` picks them, and a question with no note gets “I couldn’t find “query” near you.”. The pending item carries `substitute: {"note": …}`. `_add` now clears `products` on `AgentError`, so an unranked search offers nothing.
+- `ShoppingTools._substitutes(state, memory, query, products, wanted, ranked)` pools sellable search results. When no bought-before product is in the pool, it looks up at most `MAX_USUAL_LOOKUPS` (1) bought-before product that passes the gate by name, and keeps only the same catalog ID, still sellable. It gates, sorts (bought, same category, ranked, search order), keeps `MAX_SUBSTITUTES` (3) and marks usual ones through `_usual_first`. `_bought(memory)` is the shared history map (empty after FORGET).
+- `ShoppingTools.cart_substitutes(state, memory)` needs `cart.cart_writes` and a location. It reads `CheckoutFlow.unavailable_lines` and refreshes history. For at most `MAX_SUBSTITUTE_LINES` (3) lines, it searches the line's name, takes the category from JioMart's own listing of that ID, and builds questions with `substitute: {note, replaces: str(line key)}`. It replaces `memory["pending"]` and returns notes plus `next_choice`.
+- `next_choice` renders a substitute question as “<note> Would one of these do?” with “add it to your cart instead” or “replace it in your cart”, and a Skip row of “Don’t add a substitute” or “Leave your cart as it is”. `_choose` calls `add_products` directly (`_receipt` is now `add_products` + `_said`). For a `replaces` item it then calls `CheckoutFlow.remove_line`, but only when the add had no error and the product was added or already present. `_skip` of a replace item says the line stays, marked unavailable.
+- `CheckoutFlow.substitutes` (default `None`; `Conversation.__init__` sets it to `tools.cart_substitutes`) enables the `find_substitutes` navigation button in a blocked review (Find substitutes · Remove unavailable · Keep shopping; Empty cart only when fewer than three), the blocker wording and the CART hint. `unavailable_lines(state, memory)` returns `{key, quantity, product: {id, name, brand, category}}` from the cart plus `memory["cart_products"]`. `remove_line(state, key, name)` re-reads the cart and removes that one line if still present.
+- `Conversation`: `SUBSTITUTE_COMMANDS` (“find substitutes”, “substitutes”, “find alternatives”, …) route to `cart_substitutes` inside the main try block (so commerce errors and memory saving behave as for other actions); `_last_action` `substitutes` gives View cart · Checkout · Keep shopping.
+
+### Gotchas
+
+- Order-based history items have `category: None`, so a bought-before product the search didn't return is looked up only when its name passes the noun rule. Chat-placed orders keep the listing's category through `cart_products`.
+- The noun rule is deliberately strict: “Coca Cola Zero” (noun `cola`) won't accept “Pepsi Black Zero Sugar” by name; it passes only through the shared “Soft Drinks” category.
+- A model-ranked alternative with no known `wanted` category passes on the relevance check alone, as alternatives did before. That keeps vague requests (“snacks”) answerable.
+- The replaced line is found again by `(product_uid, item_size)` key; if it has already gone, the reply says so and nothing else is removed. It is removed even if it became available again in between, because the customer tapped Replace.
+- The `find_substitutes` button is navigation only (no snapshot check), like `remove_unavailable`; the question it opens and the later tap re-read the cart.
+
+### Tests
+
+`tests/test_catalog.py` (gate: category, noun, formulation, merchandise), `tests/test_shopping_tools.py` (labelled substitutes with bought-before first and one name look-up, not-listed wording, usual unavailable), `tests/test_checkout_conversation.py` (blocked review → Find substitutes → tap replaces only that line, Skip, newer request replaces the question, nothing close / nothing unavailable) and `tests/test_checkout.py` (button only with a finder, `unavailable_lines`, `remove_line`).
+

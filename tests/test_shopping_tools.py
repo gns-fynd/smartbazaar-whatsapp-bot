@@ -368,3 +368,79 @@ def test_a_chat_order_counts_as_purchase_evidence_straight_away():
     clear_ordered_lines(memory, {"order_id": "FY2", "at": time.time(), "ordered_keys": [["amul", "OS"]]})
     assert memory["history"]["items"][0]["orders"] == 2
     assert remembered_choice(memory, "dahi", time.time())["product"]["id"] == "amul"
+
+
+MASTI_RAW = {"id": "masti", "name": "Amul Masti Dahi 400 g", "brand": "Amul", "pack": "400 g", "category": "Curd", "sellable": False}
+MOTHER_RAW = {"id": "mother", "name": "Mother Dairy Curd 400 g", "brand": "Mother Dairy", "pack": "400 g", "category": "Curd", "sellable": True}
+NESTLE_RAW = {"id": "nestle", "name": "Nestle a+ Dahi 400 g", "brand": "Nestle", "pack": "400 g", "category": "Curd", "sellable": True}
+BUTTER_RAW = {"id": "butter", "name": "Amul Butter 100 g", "brand": "Amul", "pack": "100 g", "category": "Butter", "sellable": True}
+
+
+class ShelfCommerce(OrdersCommerce):
+    """Search lists what the shelf has for each query; the account's own orders are its history."""
+
+    def __init__(self, shelf, orders=()):
+        super().__init__(list(orders))
+        self.shelf = shelf
+
+    async def search(self, query, location, session):
+        self.queries.append(query)
+        return {"items": self.shelf.get(query, [])}
+
+
+@pytest.mark.asyncio
+async def test_an_unavailable_product_offers_labelled_substitutes_bought_before_first(state):
+    cart = Cart()
+    commerce = ShelfCommerce({"amul masti curd 400 g": [MASTI_RAW, BUTTER_RAW, NESTLE_RAW],
+                              "Mother Dairy Curd 400 g": [MOTHER_RAW]}, orders=[order("o1", 3, MOTHER)])
+    memory = {}
+    tools = tools_for(commerce, cart)
+
+    asked = await tools.execute(Intent(action="add", items=[ShoppingLine(query="amul masti dahi 400 g")]), state, memory)
+
+    menu = asked[-1]
+    # Something bought before is looked up once by name and comes first; then the same category.
+    # Butter is never offered for dahi, and nothing is added until the customer taps.
+    assert commerce.queries == ["amul masti curd 400 g", "Mother Dairy Curd 400 g"]
+    assert menu["body"].startswith(
+        "Amul Masti Dahi 400 g is unavailable. Would one of these do?\n"
+        "1. Mother Dairy Curd 400 g — 400 g (you've bought this before)\n"
+        "2. Nestle a+ Dahi 400 g — 400 g\n"
+        "Tap a number to add it to your cart instead, or Skip.")
+    assert menu["rows"][-1]["description"] == "Don’t add a substitute"
+    assert cart.adds == []
+
+    await tools.execute(Intent(action="choose", choice_number=2), state, memory)
+    assert cart.adds == [[("nestle", 1)]] and "pending" not in memory
+
+
+@pytest.mark.asyncio
+async def test_a_product_not_listed_offers_only_same_kind_substitutes(state):
+    cart = Cart()
+    tools = tools_for(ShelfCommerce({"amul masti curd 400 g": [BUTTER_RAW, NESTLE_RAW]}), cart)
+    memory = {}
+    asked = await tools.execute(Intent(action="add", items=[ShoppingLine(query="amul masti dahi 400 g")]), state, memory)
+
+    # A search miss is “couldn’t find”, never a stock claim.
+    assert asked[-1]["body"].startswith("I couldn’t find “amul masti curd 400 g” near you. Would one of these do?\n"
+                                        "1. Nestle a+ Dahi 400 g")
+    assert [p["id"] for p in memory["pending"]["items"][0]["products"]] == ["nestle"]
+
+    nothing = await tools_for(ShelfCommerce({"amul masti curd 400 g": [BUTTER_RAW]}), cart).execute(
+        Intent(action="add", items=[ShoppingLine(query="amul masti dahi 400 g")]), state, memory)
+    assert nothing == ["I couldn’t find a clear match for “amul masti curd 400 g” near you. Tell me a brand or pack size and I’ll look again."]
+    assert cart.adds == [] and "pending" not in memory
+
+
+@pytest.mark.asyncio
+async def test_when_the_usual_is_unavailable_the_choice_says_so(state):
+    cart = Cart()
+    commerce = ShelfCommerce({"Amul Masti Dahi 400 g": [MASTI_RAW, MOTHER_RAW, NESTLE_RAW]},
+                             orders=[order("o1", 3, ("masti", "Amul Masti Dahi 400 g", "Amul"))])
+    memory = {}
+    asked = await tools_for(commerce, cart).execute(Intent(action="add", items=[ShoppingLine(query="dahi")]), state, memory)
+
+    assert commerce.queries == ["Amul Masti Dahi 400 g"]
+    assert asked[-1]["body"].startswith("Your usual Amul Masti Dahi 400 g is unavailable. Would one of these do?\n"
+                                        "1. Mother Dairy Curd 400 g")
+    assert cart.adds == []

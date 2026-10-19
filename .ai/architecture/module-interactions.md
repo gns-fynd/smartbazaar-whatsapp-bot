@@ -430,3 +430,12 @@ flowchart LR
 2. `cancel_confirm` → `_confirm_cancel` re-reads `get_order_detail`, then per shipment `cancellation_reasons` → `cancel_shipment`. `rejected` stops with “nothing changed”; `unknown` stops with “check My Orders” and is never retried.
 3. INVOICE n → `OrdersFlow.invoice` → `invoice_document` → `JioMartClient.invoice_pdf` (lookup, allowlisted HTTPS download without redirects, ≤5 MB, PDF) → outbox `document`.
 4. `CheckoutFlow._submit` appends `receipt.summary_message` to the cash-on-delivery placement reply; `OrderWatcher._step` appends it to the online “Payment received” push and appends `invoice_document` to the Delivered push when the shipment is not marked without an invoice.
+
+### Flow 15: substitutes (19 October, later)
+
+Implemented and locally tested; not deployed.
+
+1. Add path: `ShoppingTools._add` → no sellable exact match → `_unavailable` (what can't be had, and how to say it) → `_substitutes` (gate `catalog.product_is_substitute`; at most one extra `JioMartClient.search` for a bought-before product) → `memory["pending"]` item with `substitute.note` → `next_choice`.
+2. Checkout path: `CheckoutFlow._review` (blocked, unavailable lines, `substitutes` set) → `sbco_` `find_substitutes` → `CheckoutFlow.handle_button` → `ShoppingTools.cart_substitutes` (wired by `Conversation.__init__`) → `CheckoutFlow.unavailable_lines` → one `search` per line (≤3) → `_substitutes` → pending items with `substitute.replaces`.
+3. Tap: `sbch_` → `choose n` → `ShoppingTools._choose` → `CheckoutFlow.add_products`; then, for `replaces`, `CheckoutFlow.remove_line` → `update_cart(remove_item)` for that one line.
+

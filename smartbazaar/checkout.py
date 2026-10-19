@@ -51,6 +51,9 @@ class CheckoutFlow:
         # Returns the bot's current public HTTPS origin (for payment links), or None.
         self.public_origin = public_origin or (lambda: None)
         self.online_payment = online_payment
+        # Set by the conversation to ShoppingTools.cart_substitutes: (state, memory) -> replies.
+        # Without it the review offers no "Find substitutes" button.
+        self.substitutes = None
 
     # ----- reading -----
 
@@ -106,7 +109,7 @@ class CheckoutFlow:
         if self.cart_writes:
             hint = "Say ‘remove 2 from cart’, ‘make 1 two in cart’"
             if any(item.get("available") is False for item in cart["items"]):
-                hint += " or ‘remove unavailable items’"
+                hint += ", ‘find substitutes’ or ‘remove unavailable items’" if self.substitutes else " or ‘remove unavailable items’"
             lines.append(hint + ". Send CHECKOUT to review and place the order.")
         else:
             lines.append("Send CHECKOUT to review the order.")
@@ -335,6 +338,40 @@ class CheckoutFlow:
         state["just_added"] = [line["name"] for key, line in wanted.items() if key not in existing]
         return result
 
+    async def unavailable_lines(self, state: dict, memory: dict) -> list[dict]:
+        """Cart lines JioMart marks unavailable, with what this chat knows about each product."""
+        cart = await self.commerce.get_cart(state["session"], state["location"])
+        known = memory.get("cart_products", {})
+        lines = []
+        for item in cart["items"]:
+            key = _line_key(item["identifiers"], item.get("item_size"))
+            if item.get("available") is not False or not key or not item.get("name"):
+                continue
+            product = known.get(str(key)) if isinstance(known.get(str(key)), dict) else {}
+            lines.append({"key": str(key), "quantity": item["quantity"], "product": {
+                "id": str(product.get("id") or key[0]), "name": item["name"],
+                "brand": product.get("brand"), "category": product.get("category"),
+            }})
+        return lines
+
+    async def remove_line(self, state: dict, key: str, name: str) -> str:
+        """Remove the one cart line a tapped substitute replaces, if it is still there."""
+        cart = await self.commerce.get_cart(state["session"], state["location"])
+        found = [item for item in cart["items"] if str(_line_key(item["identifiers"], item.get("item_size"))) == key]
+        if not found:
+            return f"{name} is no longer in your cart."
+        payload = [{**item["identifiers"], "item_size": item.get("item_size"), "item_index": item.get("item_index"),
+                    "quantity": item["quantity"]} for item in found[:1]]
+        try:
+            await self.commerce.update_cart(state["session"], state["location"], "remove_item", payload, cart["cart_id"])
+        except CommerceError as exc:
+            if exc.code == "auth_expired":
+                raise
+            return f"JioMart didn’t let me remove {name}. Send ‘remove unavailable items’ to try again."
+        except ValueError:
+            return f"I couldn’t identify {name} in your cart safely. Send CART and remove it by number."
+        return f"Removed {name} (unavailable) from your cart."
+
     async def cart_item(self, state: dict, number: int) -> dict | str:
         """The product on line ``number`` of the last cart view (for ‘remember line 2’)."""
         cart = await self.commerce.get_cart(state["session"], state["location"])
@@ -358,7 +395,9 @@ class CheckoutFlow:
         blockers = []
         unavailable = [item for item in cart["items"] if item.get("available") is False]
         if unavailable:
-            blockers.append(f"{len(unavailable)} item(s) can’t be delivered right now. Send ‘remove unavailable items’ first.")
+            blockers.append(f"{len(unavailable)} item(s) can’t be delivered right now. "
+                            + ("Find substitutes for them, or remove them first." if self.substitutes
+                               else "Send ‘remove unavailable items’ first."))
         if not cart["is_valid"] and not unavailable:
             blockers.append("JioMart reports this cart isn’t ready for checkout yet.")
         if total is None:
@@ -389,9 +428,14 @@ class CheckoutFlow:
             buttons: list[dict] = []
         elif blockers:
             closing = blockers
-            buttons = ([self._button(state, "remove_unavailable", "Remove unavailable", cart)] if unavailable else [])
-            buttons += [self._button(state, "keep_shopping", "Keep shopping", cart),
-                        self._button(state, "empty_cart", "Empty cart", cart)]
+            buttons = []
+            if unavailable:
+                if self.substitutes:
+                    buttons.append(self._button(state, "find_substitutes", "Find substitutes", cart))
+                buttons.append(self._button(state, "remove_unavailable", "Remove unavailable", cart))
+            buttons.append(self._button(state, "keep_shopping", "Keep shopping", cart))
+            if len(buttons) < 3:
+                buttons.append(self._button(state, "empty_cart", "Empty cart", cart))
         else:
             titles = {"online": f"Pay online {_money(total)}"[:20], "cod": "Cash on delivery"}
             buttons = [self._button(state, "place_order", titles[m], cart, method=m) for m in methods]
@@ -472,7 +516,7 @@ class CheckoutFlow:
         if not isinstance(action, dict) or action.get("expires", 0) < time.time() or action.get("binding") != self._binding(state):
             state.pop("checkout", None)
             return ["That checkout button has expired. Send CHECKOUT to review your cart again."]
-        if action["kind"] in {"go_checkout", "empty_cart", "keep_shopping", "remove_unavailable"}:
+        if action["kind"] in {"go_checkout", "empty_cart", "keep_shopping", "remove_unavailable", "find_substitutes"}:
             # Navigation only; the checkout review it opens has its own fresh confirmation.
             state.pop("checkout", None)
             if action["kind"] == "keep_shopping":
@@ -481,6 +525,11 @@ class CheckoutFlow:
                 return await self.empty_cart(state)
             if action["kind"] == "remove_unavailable":
                 return await self.edit_cart(state, remove=True, unavailable=True)
+            if action["kind"] == "find_substitutes":
+                # Only questions come back; a substitute replaces a line only when it is tapped.
+                if not self.substitutes:
+                    return ["Finding substitutes isn’t available. Send CART to see your cart."]
+                return await self.substitutes(state, memory)
             return await self.prepare(owner, state, memory, account)
         cart = await self.commerce.get_cart(state["session"], state["location"])
         if self._snapshot(cart, state) != action["snapshot"]:
