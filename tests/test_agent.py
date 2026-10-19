@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from smartbazaar.agent import AgentError, Intent, ShoppingAgent
+from smartbazaar.agent import AgentError, ComposedReply, Intent, ShoppingAgent, SpokenReply
 from smartbazaar.catalog import Selection
 
 
@@ -146,3 +146,77 @@ async def test_rank_drops_fake_and_variant_exact_ids():
 async def test_missing_key_is_a_safe_error():
     with pytest.raises(AgentError, match="unavailable"):
         await ShoppingAgent("", "test-model").interpret("milk")
+
+
+def test_intent_items_and_queries_allow_up_to_twelve():
+    intent = Intent(action="search", queries=["a"] * 12, items=[{"query": "milk"}] * 12)
+    assert len(intent.queries) == 12
+    assert len(intent.items) == 12
+    with pytest.raises(ValueError):
+        Intent(action="search", queries=["a"] * 13)
+    with pytest.raises(ValueError):
+        Intent(action="search", items=[{"query": "milk"}] * 13)
+
+
+def test_intent_language_is_validated():
+    assert Intent(action="search").language is None
+    assert Intent(action="search", language="hi").language == "hi"
+    assert Intent(action="search", language="hinglish").language == "hinglish"
+    with pytest.raises(ValueError):
+        Intent(action="search", language="fr")
+
+
+@pytest.mark.asyncio
+async def test_compose_reply_passes_a_language_hint_for_button_only_replies():
+    client = FakeClient([ComposedReply(message="Aapka cart khaali hai.", button_prompt="")])
+    await ShoppingAgent("key", "test-model", client).compose_reply(
+        "", "Cart is empty.", language="hinglish"
+    )
+    call = client.responses.calls[0]
+    payload = json.loads(call["input"])
+    assert payload["language"] == "hinglish"
+    assert "the customer only tapped a button" in call["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_compose_reply_omits_language_when_not_given():
+    client = FakeClient([ComposedReply(message="Your cart is empty.", button_prompt="")])
+    await ShoppingAgent("key", "test-model", client).compose_reply("", "Cart is empty.")
+    payload = json.loads(client.responses.calls[0]["input"])
+    assert payload["language"] is None
+
+
+@pytest.mark.asyncio
+async def test_spoken_reply_uses_responses_structured_output_with_a_small_schema():
+    client = FakeClient([SpokenReply(speech="Aapka order ban gaya, bas address confirm kijiye.")])
+    agent = ShoppingAgent("key", "test-model", client)
+    speech = await agent.spoken_reply(
+        "Your order is confirmed. Total ₹249.", context="order place karo", language="hinglish"
+    )
+
+    assert speech == "Aapka order ban gaya, bas address confirm kijiye."
+    call = client.responses.calls[0]
+    assert call["text_format"] is SpokenReply
+    assert call["store"] is False
+    assert call["reasoning"] == {"effort": "low"}
+    assert call["max_output_tokens"] <= 400
+    assert json.loads(call["input"]) == {
+        "reply": "Your order is confirmed. Total ₹249.",
+        "context": "order place karo",
+        "language": "hinglish",
+    }
+
+
+@pytest.mark.asyncio
+async def test_spoken_reply_defaults_context_and_language():
+    client = FakeClient([SpokenReply(speech="Maine aapka order dekh liya hai.")])
+    await ShoppingAgent("key", "test-model", client).spoken_reply("Your order is on the way.")
+    payload = json.loads(client.responses.calls[0]["input"])
+    assert payload["context"] == ""
+    assert payload["language"] is None
+
+
+@pytest.mark.asyncio
+async def test_spoken_reply_missing_key_is_a_safe_error():
+    with pytest.raises(AgentError, match="unavailable"):
+        await ShoppingAgent("", "test-model").spoken_reply("Your order is confirmed.")

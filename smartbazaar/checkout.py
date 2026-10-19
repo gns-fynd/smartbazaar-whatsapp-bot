@@ -15,6 +15,7 @@ import secrets
 import time
 from typing import Any
 
+from . import i18n
 from .catalog import normalize_products
 from .jiomart import CommerceError
 from .receipt import summary_message
@@ -66,8 +67,8 @@ class CheckoutFlow:
             buttons = [self._button(state, "go_checkout", "Checkout", cart),
                        self._button(state, "keep_shopping", "Keep shopping", cart),
                        self._button(state, "empty_cart", "Empty cart", cart)]
-            card = self._cart_card(cart, "🛒 These are your cart items:", buttons,
-                                   ["To change anything, say ‘remove 2 from cart’ or ‘make 1 two in cart’."],
+            card = self._cart_card(cart, i18n.phrase("cart_items", state), buttons,
+                                   [i18n.phrase("cart_edit_hint", state)],
                                    fallback=self._cart_text(state, cart))
             if card:
                 return [card]
@@ -447,14 +448,14 @@ class CheckoutFlow:
                        "Tapping a payment option places the order. These buttons expire in 30 minutes."]
         if self.checkout_enabled and blockers:
             # Why checkout stopped comes first, so it never reads like the plain cart view again.
-            reason = "⚠️ Can’t place this order yet:\n" + "\n".join(blockers)
-            card = self._cart_card(cart, reason + "\n\nIn your cart:", buttons, [deliver],
+            reason = i18n.phrase("cant_order", state) + "\n" + "\n".join(blockers)
+            card = self._cart_card(cart, reason + "\n\n" + i18n.phrase("in_your_cart", state), buttons, [deliver],
                                    fallback=reason + "\n\n" + "\n".join(lines))
             if card:
                 return [card]
             body = reason + "\n\n" + "\n".join(lines)
             return [self._prompt(body, buttons)] if len(body) <= 1024 else messages + [self._prompt(reason, buttons)]
-        intro = "🧾 Ready to order. Please check and choose how to pay:" if buttons else "🛒 These are your cart items:"
+        intro = i18n.phrase("ready_to_order" if buttons else "cart_items", state)
         card = self._cart_card(cart, intro, buttons, [deliver, *closing], fallback="\n".join(lines + closing))
         if card:
             return [card]
@@ -534,7 +535,8 @@ class CheckoutFlow:
         cart = await self.commerce.get_cart(state["session"], state["location"])
         if self._snapshot(cart, state) != action["snapshot"]:
             state.pop("checkout", None)
-            return ["Your JioMart cart changed since that review (items, prices or availability). Send CHECKOUT to review it again."]
+            # Never order a cart the customer didn't see: show the new review with fresh buttons instead.
+            return [i18n.phrase("cart_changed", state)] + await self.prepare(owner, state, memory, account)
         if action["kind"] == "remove_others":
             state.pop("checkout", None)
             return ["That button is no longer used. Send CART to see your cart and ‘remove 2 from cart’ to remove a line."]
@@ -708,7 +710,7 @@ class CheckoutFlow:
             "kind": kind, "snapshot": self._snapshot(cart, state), "binding": self._binding(state),
             "expires": time.time() + CONFIRM_TTL, "method": method,
         }
-        return {"id": action_id, "title": title}
+        return {"id": action_id, "title": i18n.label(title, state)}
 
     @staticmethod
     def _prompt(body: str, buttons: list[dict]) -> dict:

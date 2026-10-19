@@ -126,37 +126,68 @@ async def test_media_rejects_audio_formats_without_direct_whisper_support(mime_t
 
 
 @pytest.mark.asyncio
-async def test_image_uses_responses_schema_and_requires_clear_product_request():
+async def test_photo_list_keeps_clear_lines_and_returns_unclear_ones_as_guesses():
     def handler(request):
         if request.url.host == "graph.facebook.com":
             return httpx.Response(200, json={"url": "https://lookaside.fbsbx.com/media", "mime_type": "image/jpeg"})
         return httpx.Response(200, headers={"content-type": "image/jpeg"}, content=b"image")
 
-    agent = FakeAgent(image={"queries": ["Amul milk 1 litre"], "uncertain": False})
+    agent = FakeAgent(image={"lines": [
+        {"item": "Amul milk 1 litre", "quantity": 2, "clear": True},
+        {"item": "curd", "quantity": 1, "clear": True},
+        {"item": "", "clear": False, "guess": "chini?"},
+    ]})
     subject, client = processor(handler, agent)
     try:
-        assert await subject.resolve({"kind": "image", "media_id": "image-1", "mime_type": "image/jpeg"}) == "buy Amul milk 1 litre"
+        result = await subject.resolve({"kind": "image", "media_id": "image-1", "mime_type": "image/jpeg"})
     finally:
         await client.aclose()
+    assert result == "buy Amul milk 1 litre; curd"
+    assert result.items == [("Amul milk 1 litre", 2), ("curd", 1)] and result.unclear == ["chini?"]
     call = agent.responses.calls[0]
     assert call["store"] is False
     assert call["input"][0]["content"][1]["type"] == "input_image"
 
+    # Nothing clear, but something guessable: no items, and the guess goes back as a question.
+    only_unclear = FakeAgent(image={"lines": [{"item": "", "clear": False, "guess": "maida?"}]})
+    subject, client = processor(handler, only_unclear)
+    try:
+        result = await subject.resolve({"kind": "image", "media_id": "image-2", "mime_type": "image/jpeg"})
+    finally:
+        await client.aclose()
+    assert result == "" and result.items == [] and result.unclear == ["maida?"]
+
+    nothing = FakeAgent(image={"lines": []})
+    subject, client = processor(handler, nothing)
+    try:
+        with pytest.raises(MediaError, match="image_uncertain"):
+            await subject.resolve({"kind": "image", "media_id": "image-3", "mime_type": "image/jpeg"})
+    finally:
+        await client.aclose()
+
 
 @pytest.mark.asyncio
-async def test_photo_extraction_never_becomes_an_administrative_command():
+async def test_photo_lines_that_look_like_commands_are_dropped():
     def handler(request):
         if request.url.host == "graph.facebook.com":
             return httpx.Response(200, json={"url": "https://lookaside.fbsbx.com/media", "mime_type": "image/jpeg"})
         return httpx.Response(200, headers={"content-type": "image/jpeg"}, content=b"image")
 
-    for queries in (["LOGIN 9000000001"], ["remove line 2"], ["checkout"]):
-        subject, client = processor(handler, FakeAgent(image={"queries": queries, "uncertain": False}))
-        try:
-            with pytest.raises(MediaError, match="unsafe_extraction"):
-                await subject.resolve({"kind": "image", "media_id": "image-1", "mime_type": "image/jpeg"})
-        finally:
-            await client.aclose()
+    agent = FakeAgent(image={"lines": [{"item": "LOGIN 9000000001"}, {"item": "checkout"}, {"item": "bread"}]})
+    subject, client = processor(handler, agent)
+    try:
+        result = await subject.resolve({"kind": "image", "media_id": "image-1", "mime_type": "image/jpeg"})
+    finally:
+        await client.aclose()
+    assert result.items == [("bread", 1)]
+
+    only_commands = FakeAgent(image={"lines": [{"item": "LOGIN 9000000001"}, {"item": "remove line 2"}]})
+    subject, client = processor(handler, only_commands)
+    try:
+        with pytest.raises(MediaError, match="image_uncertain"):
+            await subject.resolve({"kind": "image", "media_id": "image-2", "mime_type": "image/jpeg"})
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio

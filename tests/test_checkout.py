@@ -534,7 +534,10 @@ async def test_cart_change_before_tap_blocks_checkout(tmp_path):
     reply = await flow.handle_button("owner", state, memory, account, action_id)
 
     assert commerce.calls["checkout"] == []
-    assert "cart changed since that review" in reply[0]
+    assert "cart changed since that review" in reply[0] and "Nothing was ordered" in reply[0]
+    # The updated review follows straight away, with fresh payment buttons for the new total.
+    assert "2 × Coca Cola Zero 300 ml — ₹72" in reply[1]
+    assert reply[-1]["type"] == "quick_reply" and reply[-1]["buttons"][0]["id"] != action_id
 
 
 @pytest.mark.asyncio

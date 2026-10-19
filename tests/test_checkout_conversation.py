@@ -612,3 +612,35 @@ async def test_find_substitutes_with_nothing_unavailable_or_nothing_close(store)
     nothing = await bot.handle(OWNER, "919000000001", "find substitutes")
     assert body(nothing[0]).startswith("Nothing in your JioMart cart is marked unavailable right now.")
     assert commerce.updates == []
+
+
+@pytest.mark.asyncio
+async def test_a_photo_list_adds_clear_lines_and_asks_about_unclear_ones(store):
+    account = connected(store)
+    commerce = EditCommerce()
+    commerce.lines = []
+    commerce.search = catalog({"coke zero": [COKE], "paneer": PANEER})
+
+    class NoPlanner:
+        async def interpret(self, text, context):
+            raise AssertionError("a photo list is read deterministically, without the planner")
+
+        async def rank(self, query, products):
+            from smartbazaar.catalog import Selection
+            return Selection(exact_ids=[p["id"] for p in products][:3])
+
+    bot = Conversation(store, commerce, NoPlanner(), CheckoutFlow(store, commerce, cart_writes=True))
+    replies = await bot.handle(OWNER, "919000000001", "buy coke zero; paneer", shopping_only=True,
+                               photo_items=[("coke zero", 2), ("paneer", 1)], unclear=["chini?"])
+
+    texts = [body(r) for r in replies]
+    assert texts[0].startswith("📝 Read 2 item(s) from your list.")
+    assert any("• 2 × Coca Cola Zero 300 ml" in t for t in texts)
+    # The unclear line is asked about before the picture question, which stays last.
+    note = next(i for i, t in enumerate(texts) if "couldn’t read 1 line(s) clearly: “chini?”" in t)
+    assert replies[-1]["type"] == "list" and note < len(replies) - 1
+    assert [line["identifiers"]["product_uid"] for line in commerce.lines] == ["101"]
+    assert store.get_memory(OWNER, account)["pending"]["items"][0]["query"] == "paneer"
+
+    unreadable = await bot.handle(OWNER, "919000000001", "", shopping_only=True, photo_items=[], unclear=["maida?"])
+    assert "“maida?”" in body(unreadable[0]) and len(commerce.lines) == 1

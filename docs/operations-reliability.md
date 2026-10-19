@@ -163,3 +163,5 @@ Deploy from the Render dashboard ("Manual Deploy") when `/healthz` shows no `pro
 ### Voice replies (Fish Audio) — 19 October 2026
 
 Settings: `FISH_AUDIO_API_KEY` (secret; voice replies are off without it), `FISH_AUDIO_VOICE_ID` (the store manager's cloned voice, a Fish `reference_id`; empty uses Fish's default voice), `FISH_AUDIO_MODEL` (default `s2.1-pro-free`, Fish's free fair-use tier with no SLA; check Fish's pricing page for how long it stays free), and `VOICE_REPLIES` (`voice` default: reply with a voice note only to voice notes; `always`; `off`). Set the key and voice id in Render's Environment. Logs: `voice_note_sent`, `tts_failed code=…` (never the text, key or audio). A failed voice note is dropped (non-retryable, no text resend) and does not degrade `/readyz`. Each voice reply adds one Fish call (about 4 seconds) and one WhatsApp media upload after the text reply is already sent.
+
+Natural speech (19 October): each voice reply now also makes one OpenAI `spoken_reply` call (bounded to 8 seconds) before the Fish call. It falls back to the plain cleaned text when that call fails or the script fails the number check.

@@ -6,7 +6,8 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from .agent import AgentError, Intent
+from . import i18n
+from .agent import AgentError, Intent, ShoppingLine
 from .catalog import Selection, normalize_products, product_link, render_search
 from .checkout import CheckoutFlow
 from .composer import Composer
@@ -68,17 +69,27 @@ class Conversation:
         self._last_action: dict[str, str] = {}
 
     async def handle(self, owner: str, sender: str, text: str, *, shopping_only: bool = False,
-                     voice: bool = False) -> list[str | dict[str, Any]]:
+                     voice: bool = False, photo_items: list | None = None,
+                     unclear: list | None = None) -> list[str | dict[str, Any]]:
         state = self.store.get(owner)
         # WhatsApp allows free-form order updates only within 24 hours of the customer's last message.
         state["last_inbound"] = time.time()
+        # Buttons and card texts follow the language the customer last wrote or spoke in.
+        if photo_items is None and (lang := i18n.detect(text)):
+            state["lang"] = lang
         self.store.save(owner, state)
         self._last_action.pop(owner, None)
-        replies = await self._dispatch(owner, sender, text, shopping_only=shopping_only)
+        if photo_items is not None:
+            replies = await self._photo_list(owner, photo_items, unclear or [])
+        else:
+            replies = await self._dispatch(owner, sender, text, shopping_only=shopping_only)
         if self._composable(text, replies):
             # Tools supply the facts; the model writes the reply, and the composer checks it.
-            customer = "(tapped a button)" if text.startswith("/button:") else text
-            replies = await self.composer.apply(customer, replies)
+            tapped = text.startswith("/button:")
+            customer = "(tapped a button)" if tapped else text
+            # A tap carries no words, so the customer's last language is passed along instead.
+            language = i18n.language(self.store.get(owner)) if tapped else None
+            replies = await self.composer.apply(customer, replies, language=language)
         # Captured before the "heard" quote or buttons are added, so the spoken text is only
         # ever the bot's own answer, never an echo of the transcript or a tap target.
         to_speak = self._voice_text(replies) if self._voice_reply_enabled(voice) else None
@@ -90,14 +101,72 @@ class Conversation:
             else:
                 replies = [heard] + replies
         replies = self._with_buttons(owner, replies)
-        if to_speak:
-            spoken = spoken_text(to_speak)
-            if spoken:
-                # After the text: synthesis takes a few seconds, and the text with its buttons
-                # should never wait for it. The voice note follows as the spoken version.
-                replies = replies + [{"type": "voice_note", "text": spoken}]
+        replies = self._ai_note(owner, replies)
+        if to_speak and spoken_text(to_speak):
+            # After the text: synthesis takes a few seconds, and the text with its buttons should
+            # never wait for it. The sender rewrites the reply as natural speech before speaking it.
+            replies = replies + [{"type": "voice_note", "text": to_speak,
+                                  "context": " ".join(text.split())[:300] if voice else "",
+                                  "language": self.store.get(owner).get("lang")}]
         notice = self._missed_notice(owner)
         return ([notice] + replies) if notice else replies
+
+    def _ai_note(self, owner, replies):
+        """Once a day, say plainly that this is an AI assistant (it may speak in a real person's voice).
+
+        It goes in the small grey footer of a button message, so the reply itself is unchanged.
+        """
+        state = self.store.get(owner)
+        today = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 19800))
+        if state.get("ai_note_day") == today:
+            return replies
+        note = i18n.phrase("ai_note", state)
+        for index in range(len(replies) - 1, -1, -1):
+            reply = replies[index]
+            if isinstance(reply, dict) and reply.get("type") == "quick_reply" and not reply.get("footer"):
+                replies = list(replies)
+                replies[index] = {**reply, "footer": note[:60], "fallback": f"{reply.get('fallback', '')}\n{note}"}
+                state["ai_note_day"] = today
+                self.store.save(owner, state)
+                break
+        return replies
+
+    async def _photo_list(self, owner, items, unclear):
+        """A photographed list: clearly read lines go straight to the cart, unclear ones become a question."""
+        state = self.store.get(owner)
+        if not state.get("session") or state.get("challenge"):
+            return ["Connect your JioMart account before sending shopping photos."]
+        if not state.get("location"):
+            return ["Send your 6-digit delivery pincode first so I can find products for your area."]
+        try:
+            account = self.store.memory_key(state["session"])
+        except ValueError:
+            return ["Please send LOGIN to reconnect your account before shopping."]
+        memory = self.store.get_memory(owner, account)
+        roll_session(memory, time.time())
+        self._last_action[owner] = "add"
+        replies: list = []
+        try:
+            if items:
+                intent = Intent(action="add", items=[ShoppingLine(query=query, quantity=quantity)
+                                                     for query, quantity in items[:12]])
+                replies = [i18n.phrase("photo_read", state, n=len(intent.items))]
+                replies += await self.tools.execute(intent, state, memory)
+        except AgentError:
+            return ["I couldn’t look those items up just now. Please try the photo again in a moment."]
+        except CommerceError as exc:
+            return self._handle_commerce_error(owner, state, exc)
+        finally:
+            if self.store.get(owner).get("session"):
+                self.store.save_memory(owner, account, memory)
+                self.store.save(owner, state)
+        if unclear:
+            lines = ", ".join(f"“{line}”" for line in unclear[:6])
+            note = i18n.phrase("photo_unclear", state, n=len(unclear), lines=lines)
+            # Before any picture question, so the question stays the last thing to answer.
+            at = next((i for i, reply in enumerate(replies) if isinstance(reply, dict)), len(replies))
+            replies.insert(at, note)
+        return replies
 
     def _voice_reply_enabled(self, voice: bool) -> bool:
         if self.voice_replies == "always":
@@ -387,6 +456,9 @@ class Conversation:
                      "pincode": state.get("location", {}).get("pincode")},
                 )
             self._last_action[owner] = intent.action
+            if getattr(intent, "language", None) in i18n.LANGUAGES:
+                # The planner reads Hinglish better than word lists; buttons follow its call.
+                state["lang"] = intent.language
             if shopping_only and intent.action not in {"search", "add"}:
                 return ["Please send shopping items in the photo, and use text or a voice note for other actions."]
             if intent.action in {"checkout", "cart", "cart_remove", "cart_quantity", "order_status", "orders",
@@ -656,7 +728,7 @@ class Conversation:
                 continue
             if any(button["title"] == LABELS[name] for button in buttons):
                 continue
-            buttons.append({"id": self._quick_button(state, name), "title": LABELS[name]})
+            buttons.append({"id": self._quick_button(state, name), "title": i18n.label(LABELS[name], state)})
             if len(buttons) == 3:
                 break
         if not buttons or len(body) > 1024:
@@ -720,28 +792,25 @@ class Conversation:
             return None
         exact = bool(safe.exact_ids)
         price = self._price(product.get("price"))
-        body = product["name"]
-        if price:
-            body += f"\n{price}"
-        if not exact:
-            body = f"Alternative for {query}:\n{body}"
-        else:
-            body = f"Match for {query}:\n{body}"
-        body += f"\nPincode {pincode}"
+        # Reads like a shop assistant pointing at a shelf; the pincode lives in the footer.
+        heading = i18n.phrase("match" if exact else "alternative", state, query=query)
+        body = f"{heading}\n*{product['name']}*" + (f"\n{price}" if price else "")
         buttons = []
         if self.checkout.cart_writes:
             buttons.append({"id": self._add_action(state, "sbpc_", {"kind": "add", "query": query, "product": product}),
-                            "title": "Add to cart"})
+                            "title": i18n.label("Add to cart", state)})
         buttons.append({"id": self._add_action(state, "sbpc_", {"kind": "view", "query": query, "product": product}),
-                        "title": "View details"})
+                        "title": i18n.label("View details", state)})
         if index + 1 < len(candidates):
             next_id = self._add_action(state, "sbpc_", {
                 "kind": "next", "query": query, "products": candidates, "index": index + 1, "exact": exact,
             })
-            buttons.append({"id": next_id, "title": "Next option"})
+            buttons.append({"id": next_id, "title": i18n.label("Next option", state)})
         else:
-            buttons.append({"id": self._add_action(state, "sbpc_", {"kind": "search_again"}), "title": "Search again"})
-        footer = "Listing price · Tap Add to cart to buy" if self.checkout.cart_writes else "Listing price · Not added to cart"
+            buttons.append({"id": self._add_action(state, "sbpc_", {"kind": "search_again"}),
+                            "title": i18n.label("Search again", state)})
+        footer = (i18n.phrase("card_footer", state, pincode=pincode) if self.checkout.cart_writes
+                  else f"Listing price for {pincode} · Not added to cart")
         return {
             "type": "product_card",
             "image_url": image_url,
@@ -825,9 +894,9 @@ class Conversation:
         buttons = []
         if self.checkout.cart_writes:
             buttons.append({"id": self._add_action(state, "sbpc_", {"kind": "add", "query": query, "product": product}),
-                            "title": "Add to cart"})
-        buttons.append({"id": self._quick_button(state, "search"), "title": LABELS["search"]})
-        buttons.append({"id": self._quick_button(state, "cart"), "title": LABELS["cart"]})
+                            "title": i18n.label("Add to cart", state)})
+        buttons.append({"id": self._quick_button(state, "search"), "title": i18n.label(LABELS["search"], state)})
+        buttons.append({"id": self._quick_button(state, "cart"), "title": i18n.label(LABELS["cart"], state)})
         return {"type": "quick_reply", "body": body[:1024], "buttons": buttons, "fallback": body}
 
     @staticmethod

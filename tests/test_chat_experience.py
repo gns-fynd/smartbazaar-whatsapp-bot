@@ -122,7 +122,7 @@ async def test_secrets_pending_otp_and_logout_do_not_enter_chat_memory(store):
     assert "dialogue" not in store.get("a")
     await conversation.handle("a", "919000000001", "LOGOUT")
     # Only the new Connect/help shortcuts remain; no session, dialogue or memory.
-    assert set(store.get("a")) <= {"button_actions"}
+    assert set(store.get("a")) <= {"button_actions", "ai_note_day"}
 
 
 @pytest.mark.asyncio
@@ -223,7 +223,9 @@ async def test_voice_reply_adds_one_voice_note_after_the_text_only_for_a_transcr
 
     # The spoken text is the bot's own answer, not the "🎤 heard" echo or a tap target, and it
     # follows the text so the buttons never wait for speech synthesis.
-    assert reply[-1] == {"type": "voice_note", "text": "I can track your orders and fill your cart."}
+    # The raw answer plus what the customer said; the sender rewrites it as natural speech.
+    assert reply[-1] == {"type": "voice_note", "text": "I can track your orders and fill your cart.",
+                         "context": "what can you do for me", "language": "en"}
     assert body(reply[0]).startswith("🎤 “what can you do for me”\n\nI can track your orders")
     assert reply[-2]["type"] == "quick_reply"
 
@@ -245,7 +247,8 @@ async def test_voice_reply_always_mode_speaks_even_a_typed_reply(store):
 
     reply = await conversation.handle("a", "919000000001", "what can you do for me")
 
-    assert reply[-1] == {"type": "voice_note", "text": "I can track your orders and fill your cart."}
+    assert reply[-1] == {"type": "voice_note", "text": "I can track your orders and fill your cart.",
+                         "context": "", "language": "en"}
 
 
 @pytest.mark.asyncio
@@ -256,3 +259,22 @@ async def test_voice_reply_defaults_off_so_a_configured_voice_note_setting_is_re
     reply = await conversation.handle("a", "919000000001", "what can you do for me", voice=True)
 
     assert all(not (isinstance(r, dict) and r.get("type") == "voice_note") for r in reply)
+
+
+@pytest.mark.asyncio
+async def test_ai_disclosure_is_a_daily_footer_and_buttons_follow_the_customers_language(store):
+    agent = Planner(greeting(), greeting(), greeting())
+    conversation = Conversation(store, Commerce(), agent)
+
+    first = (await conversation.handle("a", "919000000001", "mujhe dahi chahiye bhai"))[0]
+    # Hinglish in, Hinglish buttons and disclosure out; the reply text itself is untouched.
+    assert first["body"] == "Hello! What groceries are on your mind?"
+    assert first["footer"] == "🤖 Main SmartBazaar ka AI shopping assistant hoon."
+    assert [b["title"] for b in first["buttons"]] == ["JioMart connect karo", "Aap kya karte ho?"]
+
+    second = (await conversation.handle("a", "919000000001", "hello"))[0]
+    assert "footer" not in second  # once a day is enough
+    assert [b["title"] for b in second["buttons"]] == ["Connect JioMart", "What can you do?"]
+
+    third = (await conversation.handle("b", "919000000002", "दूध चाहिए"))[0]
+    assert third["footer"].startswith("🤖 मैं SmartBazaar") and third["buttons"][0]["title"] == "JioMart जोड़ें"

@@ -1,9 +1,10 @@
+import asyncio
 import json
 
 import httpx
 import pytest
 
-from smartbazaar.tts import TTSError
+from smartbazaar.tts import TTSError, spoken_text
 from smartbazaar.whatsapp import DeliveryError, WhatsApp
 
 
@@ -17,6 +18,31 @@ class FakeTTS:
         if self.error:
             raise self.error
         return self.audio, self.mime
+
+
+class FakeSpeech:
+    """A fake `speech` callable: `(text, context, language) -> str`."""
+
+    def __init__(self, result=None, error=None, delay=0):
+        self.result, self.error, self.delay = result, error, delay
+        self.calls = []
+
+    async def __call__(self, text, context, language):
+        self.calls.append((text, context, language))
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def _voice_note_transport():
+    async def graph(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media"):
+            return httpx.Response(200, json={"id": "media-voice"})
+        return httpx.Response(200, json={"messages": [{"id": "wamid.voice"}]})
+
+    return httpx.MockTransport(graph)
 
 
 @pytest.mark.asyncio
@@ -232,3 +258,82 @@ async def test_voice_note_without_a_configured_tts_client_fails_without_a_networ
     finally:
         await client.close()
     assert failure.value.code == "tts_failed"
+
+
+@pytest.mark.asyncio
+async def test_voice_note_speaks_the_faithful_script_from_speech_and_passes_context_and_language():
+    text = "Your order is confirmed. Total ₹249."
+    tts = FakeTTS()
+    speech = FakeSpeech(result="Your order is confirmed, total 249 rupees.")
+    client = WhatsApp("token", "phone-1", "v25.0", transport=_voice_note_transport(), tts=tts, speech=speech)
+
+    await client.send(
+        "919000000001",
+        {"type": "voice_note", "text": text, "context": "order kar diya kya", "language": "en"},
+    )
+    await client.close()
+
+    assert speech.calls == [(text, "order kar diya kya", "en")]
+    assert tts.calls == ["Your order is confirmed, total 249 rupees."]
+
+
+@pytest.mark.asyncio
+async def test_voice_note_falls_back_when_speech_invents_a_number():
+    text = "Your order is confirmed. Total ₹249."
+    tts = FakeTTS()
+    speech = FakeSpeech(result="Your total is 999 rupees.")
+    client = WhatsApp("token", "phone-1", "v25.0", transport=_voice_note_transport(), tts=tts, speech=speech)
+
+    await client.send("919000000001", {"type": "voice_note", "text": text})
+    await client.close()
+
+    assert tts.calls == [spoken_text(text)]
+
+
+@pytest.mark.asyncio
+async def test_voice_note_falls_back_when_speech_contains_a_url():
+    text = "Your order is confirmed."
+    tts = FakeTTS()
+    speech = FakeSpeech(result="See https://jiomart.com/orders for details.")
+    client = WhatsApp("token", "phone-1", "v25.0", transport=_voice_note_transport(), tts=tts, speech=speech)
+
+    await client.send("919000000001", {"type": "voice_note", "text": text})
+    await client.close()
+
+    assert tts.calls == [spoken_text(text)]
+
+
+@pytest.mark.asyncio
+async def test_voice_note_falls_back_when_speech_raises():
+    text = "Your order is confirmed."
+    tts = FakeTTS()
+    speech = FakeSpeech(error=RuntimeError("boom"))
+    client = WhatsApp("token", "phone-1", "v25.0", transport=_voice_note_transport(), tts=tts, speech=speech)
+
+    await client.send("919000000001", {"type": "voice_note", "text": text})
+    await client.close()
+
+    assert tts.calls == [spoken_text(text)]
+
+
+@pytest.mark.asyncio
+async def test_voice_note_falls_back_when_speech_times_out(monkeypatch):
+    monkeypatch.setattr("smartbazaar.whatsapp.SPEECH_TIMEOUT_SECONDS", 0.05)
+    text = "Your order is confirmed."
+    tts = FakeTTS()
+    speech = FakeSpeech(result="Your order is confirmed.", delay=1)
+    client = WhatsApp("token", "phone-1", "v25.0", transport=_voice_note_transport(), tts=tts, speech=speech)
+
+    await client.send("919000000001", {"type": "voice_note", "text": text})
+    await client.close()
+
+    assert tts.calls == [spoken_text(text)]
+
+
+
+def test_spoken_amounts_use_the_customers_word_for_rupees():
+    from smartbazaar.whatsapp import _say_rupees
+
+    assert _say_rupees("Heritage curd ₹69 mein hai", "hinglish") == "Heritage curd 69 rupaye mein hai"
+    assert _say_rupees("कुल ₹2,849 है", "hi") == "कुल 2849 रुपये है"
+    assert _say_rupees("Your total is ₹190.", None) == "Your total is 190 rupees."

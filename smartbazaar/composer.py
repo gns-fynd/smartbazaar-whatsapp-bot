@@ -61,7 +61,7 @@ class Composer:
     def __init__(self, agent):
         self.agent = agent
 
-    async def apply(self, customer_text: str, replies: list) -> list:
+    async def apply(self, customer_text: str, replies: list, language: str | None = None) -> list:
         compose = getattr(self.agent, "compose_reply", None)
         texts = [r for r in replies if isinstance(r, str)]
         interactive = next((r for r in replies if isinstance(r, dict) and r.get("type") in _COMPOSABLE), None)
@@ -70,7 +70,9 @@ class Composer:
         draft = "\n\n".join(texts)
         prompt_draft = interactive.get("body", "") if interactive else ""
         try:
-            result = await compose(safe_turn(customer_text)[:480], draft, prompt_draft)
+            # ``language`` is only known (and passed) when the customer tapped a button.
+            extra = {"language": language} if language else {}
+            result = await compose(safe_turn(customer_text)[:480], draft, prompt_draft, **extra)
         except Exception as exc:  # The verified draft is always a safe answer.
             log.warning("compose_failed type=%s", type(exc).__name__)
             return replies

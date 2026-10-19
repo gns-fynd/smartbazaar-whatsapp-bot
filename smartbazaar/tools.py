@@ -12,6 +12,7 @@ replaced in the cart) until the customer taps an option.
 import secrets
 import time
 
+from . import i18n
 from .agent import AgentError
 from .catalog import (
     normalize_products,
@@ -187,36 +188,40 @@ class ShoppingTools:
         tokens = {"sbch_" + secrets.token_urlsafe(12): i for i in range(len(products))}
         skip = "sbch_" + secrets.token_urlsafe(12)
         pending["tokens"] = {**tokens, skip: -1}
-        count = f" (1 of {len(items)} to choose)" if len(items) > 1 else ""
+        count = i18n.phrase("of_n", state, n=len(items)) if len(items) > 1 else ""
+        english = i18n.language(state) == "en"
         # A substitute question says plainly that the product asked for can't be had.
         substitute = item.get("substitute") if isinstance(item.get("substitute"), dict) else None
         if substitute:
-            lines = [f"{substitute['note']} Would one of these do?{count}"]
+            lines = [f"{substitute['note']} {i18n.phrase('would_do', state)}{count}"]
             action = "replace it in your cart" if substitute.get("replaces") else "add it to your cart instead"
             skip_note = "Leave your cart as it is" if substitute.get("replaces") else "Don’t add a substitute"
         else:
-            lines = [f"Which {item['query']} would you like?{count}"]
+            lines = [i18n.phrase("which", state, query=item["query"]) + count]
             action, skip_note = "add it to your cart", f"Don’t add {item['query']}"
         for i, product in enumerate(products, 1):
             detail = " · ".join(part for part in (product.get("pack") or "", _price(product.get("price"))) if part)
             lines.append(f"{i}. {product['name']}" + (f" — {detail}" if detail else "")
-                         + (" (you've bought this before)" if product.get("usual") else ""))
-        lines.append(f"Tap a number to {action}" + (", or Skip." if len(products) < 3 else ", or say ‘skip’."))
+                         + (i18n.phrase("bought_before", state) if product.get("usual") else ""))
+        if english:
+            lines.append(f"Tap a number to {action}" + (", or Skip." if len(products) < 3 else ", or say ‘skip’."))
+        else:
+            lines.append(i18n.phrase("tap_or_skip" if len(products) < 3 else "tap_or_say_skip", state))
         body = "\n".join(lines)[:1024]
         buttons = [{"id": token, "title": _short_label(i + 1, products[i])} for token, i in tokens.items()]
         if len({b["title"] for b in buttons}) < len(buttons):
             buttons = [{"id": token, "title": f"Option {i + 1}"} for token, i in tokens.items()]
         if len(buttons) < 3:
-            buttons.append({"id": skip, "title": "Skip"})
+            buttons.append({"id": skip, "title": i18n.label("Skip", state)})
         rows = []
         for token, i in tokens.items():
             product = products[i]
             detail = " · ".join(part for part in (_price(product.get("price")), product.get("pack") or "",
                                                   product.get("brand") or "") if part)
             rows.append({"id": token, "title": product["name"][:24], "description": (detail or product["name"])[:72]})
-        rows.append({"id": skip, "title": "Skip this item", "description": skip_note[:72]})
+        rows.append({"id": skip, "title": i18n.label("Skip this item", state)[:24], "description": skip_note[:72]})
         fallback = body + "\nReply ‘choose 1’ (or another number), or ‘skip’."
-        menu = {"type": "list", "body": body, "button": "Choose", "rows": rows, "fallback": fallback}
+        menu = {"type": "list", "body": body, "button": i18n.label("Choose", state), "rows": rows, "fallback": fallback}
         if not all(isinstance(p.get("image_url"), str) for p in products):
             return menu
         return {"type": "choice_card", "items": [{"image_url": p["image_url"]} for p in products],

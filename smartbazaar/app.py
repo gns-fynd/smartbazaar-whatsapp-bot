@@ -127,6 +127,7 @@ def create_app(settings=None, commerce=None, agent=None, transport=None, media=N
                 settings.meta_phone_number_id,
                 settings.meta_graph_version,
                 tts=app.state.tts,
+                speech=app.state.agent.spoken_reply if app.state.tts else None,
             )
         app.state.public_origin = public_origin(settings.public_base_url or settings.render_external_url)
         # Without a configured origin, ask the local tunnel itself; request headers are never trusted.
@@ -638,7 +639,7 @@ async def inbox_worker(app):
                                 text = await app.state.media.resolve(payload)
                             except MediaError as exc:
                                 if exc.code == "image_uncertain":
-                                    replies = ["I couldn’t identify the product clearly. Please send a clearer image or type the product name."]
+                                    replies = ["I couldn’t read anything on that photo clearly. Please send a sharper photo, or just type the items."]
                                 else:
                                     replies = ["I couldn’t read that media. Please send a product name or try another file."]
                             else:
@@ -659,7 +660,10 @@ async def inbox_worker(app):
                             handle = app.state.conversation.handle
                             # A photo can only supply shopping items; a voice note is the customer speaking.
                             if payload.get("kind") == "image":
-                                call = handle(owner, sender, text, shopping_only=True)
+                                # Clearly read list lines are added; unclear ones come back as a question.
+                                call = handle(owner, sender, text, shopping_only=True,
+                                              photo_items=getattr(text, "items", None),
+                                              unclear=getattr(text, "unclear", None))
                             elif payload.get("kind") == "audio":
                                 call = handle(owner, sender, text, voice=True)
                             else:

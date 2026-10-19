@@ -13,6 +13,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from . import i18n
 from .catalog import normalize_products
 from .jiomart import CommerceError
 
@@ -333,7 +334,7 @@ class OrdersFlow:
         actions[action_id] = {"kind": kind, "order_id": order_id, "expires": now + ACTION_TTL,
                               "binding": self._binding(state)}
         state["order_actions"] = dict(list(actions.items())[-15:])
-        return {"id": action_id, "title": title}
+        return {"id": action_id, "title": i18n.label(title, state)}
 
     @staticmethod
     def _binding(state: dict) -> str:

@@ -1,5 +1,6 @@
 """Meta transport. No message bodies, tokens, audio or phone numbers are logged."""
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -13,11 +14,14 @@ import httpx
 
 from .cart_image import build_collage, fetch_images
 from .media import media_reference
-from .tts import TTSError
+from .tts import TTSError, spoken_text
 
 log = logging.getLogger("smartbazaar")
 MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
+SPEECH_TIMEOUT_SECONDS = 8
+MAX_SPEECH_CHARS = 500
 _FILENAME = re.compile(r"[A-Za-z0-9 ._-]{1,120}\.pdf")
+_URL = re.compile(r"https?://\S+")
 
 
 class DeliveryError(Exception):
@@ -36,9 +40,12 @@ def valid_signature(raw: bytes, signature: str, secret: str) -> bool:
 class WhatsApp:
     supports_interactive = True
 
-    def __init__(self, token: str, phone_id: str, version: str, transport=None, image_transport=None, tts=None):
+    def __init__(self, token: str, phone_id: str, version: str, transport=None, image_transport=None, tts=None,
+                 speech=None):
         self.image_transport = image_transport
         self.tts = tts
+        # Optional async (text, context, language) -> str, for a friendlier voice-note script.
+        self.speech = speech
         self.client = httpx.AsyncClient(
             base_url=f"https://graph.facebook.com/{version}/",
             headers={"Authorization": f"Bearer {token}"},
@@ -143,8 +150,9 @@ class WhatsApp:
         if not isinstance(text, str) or not text or self.tts is None:
             log.warning("tts_failed code=not_configured")
             raise DeliveryError("tts_failed")
+        spoken = await self._speech_for(text, message)
         try:
-            audio, mime = await self.tts.synthesize(text)
+            audio, mime = await self.tts.synthesize(spoken)
         except TTSError as exc:
             log.warning("tts_failed code=%s", exc.code)
             raise DeliveryError("tts_failed") from None
@@ -154,6 +162,35 @@ class WhatsApp:
         # Meta's Cloud API only shows the voice-note mic/waveform treatment for an Opus/Ogg
         # file sent with "voice": true; a non-Ogg fallback is sent as a basic audio message.
         return {"type": "audio_id", "media_id": media_id, "voice": is_ogg}
+
+    async def _speech_for(self, text: str, message: Mapping) -> str:
+        """Prefer a natural voice-note script from `speech`, kept only if it stays faithful to `text`."""
+        if self.speech is not None:
+            context = message.get("context")
+            language = message.get("language")
+            try:
+                spoken = await asyncio.wait_for(
+                    self.speech(
+                        text,
+                        context if isinstance(context, str) else "",
+                        language if isinstance(language, str) else None,
+                    ),
+                    timeout=SPEECH_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                spoken = None
+            if isinstance(spoken, str) and self._faithful_speech(spoken, text):
+                return _say_rupees(spoken, language if isinstance(language, str) else None)
+        return spoken_text(text)
+
+    @staticmethod
+    def _faithful_speech(speech: str, text: str) -> bool:
+        """Non-empty, bounded, link-free, and every number spoken also appears in the reply text."""
+        if not speech or len(speech) > MAX_SPEECH_CHARS or _URL.search(speech):
+            return False
+        speech_numbers = set(re.findall(r"\d+", speech.replace(",", "")))
+        text_numbers = set(re.findall(r"\d+", text.replace(",", "")))
+        return speech_numbers <= text_numbers
 
     async def _upload(self, content: bytes, mime: str, filename: str) -> str:
         try:
@@ -351,3 +388,12 @@ class WhatsApp:
 def inbound_media_reference(message):
     """Expose only a validated attachment ID from an already-signed Meta message."""
     return media_reference(message)
+
+
+_RUPEE_AMOUNT = re.compile(r"₹\s?(-?[\d,]+(?:\.\d+)?)")
+
+
+def _say_rupees(speech: str, language: str | None) -> str:
+    """"₹69" is read inconsistently by speech models; say the amount the way the customer would."""
+    word = {"hi": "रुपये", "hinglish": "rupaye"}.get(language or "", "rupees")
+    return _RUPEE_AMOUNT.sub(lambda m: f"{m.group(1).replace(',', '')} {word}", speech)
