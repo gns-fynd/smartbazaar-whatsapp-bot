@@ -1,15 +1,19 @@
 import asyncio
 import contextlib
+import json
 import sys
 import time
+from base64 import urlsafe_b64encode
 from pathlib import Path
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from smartbazaar import session_keepalive  # noqa: I001
+from smartbazaar.jiomart import JioMartClient
 from smartbazaar.storage import Store
 
 
@@ -68,6 +72,41 @@ async def test_run_keepalive_once_persists_renewed_cookies_without_extending_the
     state = store.get(owner)
     assert state["session"]["cookies"][0]["value"] == "renewed"
     assert _updated(store, owner) == before
+
+
+@pytest.mark.asyncio
+async def test_run_keepalive_once_renews_a_live_shaped_session_through_the_real_client(store):
+    """End to end: the refresh reaches JioMart's path-scoped R.session cookie and is persisted."""
+
+    def jwt(exp: int) -> str:
+        part = urlsafe_b64encode(json.dumps({"exp": exp}).encode()).rstrip(b"=").decode()
+        return f"eyJhbGciOiJub25lIn0.{part}.sig"
+
+    now = int(time.time())
+    old_token, new_token = jwt(now + 120), jwt(now + 3600)
+    refresh_cookies = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert (request.url.host, request.url.path) == (
+            "api.jiomartjcp.com", "/api/service/application/user/authentication/v1.0/token/refresh")
+        refresh_cookies.append(sorted(p.split("=")[0].strip() for p in request.headers["cookie"].split(";")))
+        return httpx.Response(200, json={"access_token": new_token, "exp": now + 3600}, headers={
+            "set-cookie": f"f.session={new_token}; Max-Age=3600; Domain=.jiomartjcp.com; Path=/; HttpOnly; Secure"})
+
+    owner = "owner-1"
+    store.save(owner, {"last_inbound": time.time(), "session": {"cookies": [
+        {"name": "f.session", "value": old_token, "domain": ".jiomartjcp.com", "path": "/"},
+        {"name": "R.session", "value": "opaque-refresh", "domain": ".jiomartjcp.com",
+         "path": "/api/service/application/user/authentication"},
+    ]}})
+    commerce = JioMartClient("685945f46c8c7aee3f3af605", application_token="public-token",
+                             transport=httpx.MockTransport(handler))
+
+    await session_keepalive.run_keepalive_once(store, commerce, {})
+
+    assert refresh_cookies == [["R.session", "f.session"]]
+    cookies = {c["name"]: c["value"] for c in store.get(owner)["session"]["cookies"]}
+    assert cookies == {"f.session": new_token, "R.session": "opaque-refresh"}
 
 
 @pytest.mark.asyncio

@@ -673,7 +673,7 @@ async def test_expired_access_cookie_is_refreshed_once_and_the_request_retried()
     async def handler(request: httpx.Request) -> httpx.Response:
         calls.append((request.method, request.url.path, request.headers.get("cookie", "")))
         if request.url.path.endswith("/token/refresh"):
-            assert json.loads(request.content) == {"access_token": "eyJold.payload.sig"}
+            assert request.content == b""  # The cookies authenticate the refresh, as on the website.
             return httpx.Response(200, json={"access_token": "eyJnew.payload.sig", "exp": 3600})
         if "f.session=eyJnew.payload.sig" not in request.headers.get("cookie", ""):
             return httpx.Response(401, json={"message": "expired"})
@@ -685,7 +685,7 @@ async def test_expired_access_cookie_is_refreshed_once_and_the_request_retried()
     assert orders == []
     # An empty list also tries the storefront gateway, which JioMart's own My Orders page uses.
     assert [(path.split("/")[1], path.rsplit("/", 1)[-1]) for _, path, _ in calls] == [
-        ("service", "orders"), ("service", "refresh"), ("service", "orders"), ("api", "orders"),
+        ("service", "orders"), ("api", "refresh"), ("service", "orders"), ("api", "orders"),
     ]
     assert any(c["value"] == "eyJnew.payload.sig" for c in session["cookies"])
 

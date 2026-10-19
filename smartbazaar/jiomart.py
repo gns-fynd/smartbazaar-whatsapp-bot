@@ -7,9 +7,11 @@ gated off by default, as are checkout and the payment session (see checkout.py).
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import re
+import time
 from base64 import b64encode, urlsafe_b64decode
 from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -90,12 +92,21 @@ class JioMartClient:
     _LOGIN_PATH = "/service/application/user/authentication/v1.0/login/otp"
     _VERIFY_PATH = "/service/application/user/authentication/v1.0/otp/mobile/verify"
     _SESSION_PATH = "/service/application/user/authentication/v1.0/session"
-    _REFRESH_PATH = "/service/application/user/authentication/v1.0/token/refresh"
+    # The refresh token travels in the ``R.session`` cookie, which JioMart scopes to
+    # ``Path=/api/service/application/user/authentication``; only a refresh URL under that path
+    # carries it. The API host serves the same ``/api`` prefix as the storefront gateway (observed
+    # live 19 October). The unprefixed path never received the cookie and answered HTTP 400.
+    _REFRESH_PATH = "/api/service/application/user/authentication/v1.0/token/refresh"
     # Login stages run before a session exists; there is nothing to refresh there.
     _NO_REFRESH_STAGES = ("begin_login", "verify_login", "verify_session", "token_refresh", "app_token")
     # JioMart's own storefront refreshes proactively once under two minutes of life remain;
     # a slightly wider bound here absorbs this bot's own request latency.
     _PROACTIVE_REFRESH_WINDOW = 300
+    # After a failed refresh, the same access token is not refreshed again for a while, so one
+    # bad refresh doesn't add a doomed round trip to every message: briefly after a transport
+    # error, 429 or 5xx; longer after a rejection, which only a new LOGIN fixes.
+    _REFRESH_RETRY_AFTER_TRANSIENT = 60
+    _REFRESH_RETRY_AFTER_REJECTION = 15 * 60
     _ADDRESS_PATH = "/service/application/cart/v1.0/address"
     _CART_DETAIL_PATH = "/service/application/cart/v1.0/detail"
     _SELECT_ADDRESS_PATH = "/service/application/cart/v1.0/select-address"
@@ -136,6 +147,8 @@ class JioMartClient:
         self._enable_cart_writes = enable_cart_writes
         self._enable_checkout = enable_cart_writes and enable_checkout
         self._enable_order_cancel = enable_order_cancel
+        # In memory only: SHA-256 of an access token -> monotonic time its refresh may be retried.
+        self._refresh_backoff: dict[str, float] = {}
 
     @property
     def order_cancel_enabled(self) -> bool:
@@ -1926,7 +1939,8 @@ class JioMartClient:
         refreshed = False
         if refreshable and self._access_token_expiring(client.cookies):
             refreshed = True
-            await self._refresh_session(client)
+            if await self._refresh_session(client):
+                self._renew_cookie_header(client, headers)
         try:
             response = await client.request(method, url, headers=headers, **kwargs)
         except httpx.HTTPError as exc:
@@ -1940,6 +1954,7 @@ class JioMartClient:
             # JioMart access tokens are short-lived. A 401/403 means the request was not processed,
             # so refreshing once and retrying once is safe even for cart writes and checkout.
             if await self._refresh_session(client):
+                self._renew_cookie_header(client, headers)
                 try:
                     response = await client.request(method, url, headers=headers, **kwargs)
                 except httpx.HTTPError as exc:
@@ -2041,44 +2056,65 @@ class JioMartClient:
         return exp - datetime.now(UTC).timestamp() <= cls._PROACTIVE_REFRESH_WINDOW
 
     async def _refresh_session(self, client: httpx.AsyncClient) -> bool:
-        """Renew the short-lived (about one hour) access JWT, proactively or after a 401.
+        """Renew the short-lived (one hour) access JWT, proactively or after a 401.
 
-        JioMart's documented contract carries the current access token in the body; its own
-        storefront instead refreshes with the cookie alone. A 400 on the documented body is
-        retried once, cookie-only, the same way the website does. Token values are never
-        logged, and at most one refresh is attempted per call.
+        Like JioMart's website, this POSTs no body: the ``R.session`` refresh cookie and the
+        ``f.session`` access cookie authenticate it. The documented ``{"access_token": …}`` body
+        alone is refused (HTTP 400, "No refresh token found in access token"), because the access
+        JWT does not embed a refresh token. After a failure the same token is not refreshed again
+        until its backoff ends. Token values are never logged.
         """
         jwt_cookie = self._access_token_cookie(client.cookies)
         if jwt_cookie is None:
             # Cookie names only (never values), to learn which one carries the session.
-            log.warning("session_refresh_failed reason=no_access_token cookies=%s",
-                        ",".join(sorted({re.sub(r"[^A-Za-z0-9._-]", "", c.name)[:40] for c in client.cookies.jar})))
+            log.warning("session_refresh_failed reason=no_access_token cookies=%s", self._cookie_names(client.cookies))
             return False
-        for variant, body in (("body", {"access_token": jwt_cookie.value}), ("cookie", None)):
-            try:
-                response = await client.post(
-                    self._api_url(self._REFRESH_PATH), headers=self._app_headers(), json=body
-                )
-            except httpx.HTTPError:
-                log.warning("session_refresh_failed reason=transport variant=%s", variant)
-                return False
-            if response.status_code == 200:
-                try:
-                    renewed = response.json().get("access_token")
-                except (ValueError, AttributeError):
-                    renewed = None
-                if isinstance(renewed, str) and renewed.startswith("eyJ") and not any(
-                    c.name == jwt_cookie.name and c.value == renewed for c in client.cookies.jar
-                ):
-                    # Keep the client's cookie in step even if JioMart didn't send a Set-Cookie.
-                    client.cookies.set(jwt_cookie.name, renewed, domain=jwt_cookie.domain, path=jwt_cookie.path)
-                log.info("session_refreshed variant=%s", variant)
-                return True
-            if response.status_code != 400 or variant == "cookie":
-                log.warning("session_refresh_failed status=%s variant=%s", response.status_code, variant)
-                return False
-            # The documented body shape returned 400; retry once, cookie-only, like the website.
-        return False
+        key = hashlib.sha256(jwt_cookie.value.encode()).hexdigest()
+        if self._refresh_backoff.get(key, 0.0) > time.monotonic():
+            log.info("session_refresh_skipped reason=backoff")
+            return False
+        try:
+            response = await client.post(self._api_url(self._REFRESH_PATH), headers=self._app_headers())
+        except httpx.HTTPError:
+            log.warning("session_refresh_failed reason=transport")
+            self._back_off_refresh(key, self._REFRESH_RETRY_AFTER_TRANSIENT)
+            return False
+        if response.status_code != 200:
+            transient = response.status_code == 429 or response.status_code >= 500
+            self._back_off_refresh(
+                key, self._REFRESH_RETRY_AFTER_TRANSIENT if transient else self._REFRESH_RETRY_AFTER_REJECTION
+            )
+            log.warning("session_refresh_failed status=%s cookies=%s", response.status_code,
+                        self._cookie_names(client.cookies))
+            return False
+        try:
+            renewed = response.json().get("access_token")
+        except (ValueError, AttributeError):
+            renewed = None
+        if isinstance(renewed, str) and renewed.startswith("eyJ") and not any(
+            c.name == jwt_cookie.name and c.value == renewed for c in client.cookies.jar
+        ):
+            # Keep the client's cookie in step even if JioMart didn't send a Set-Cookie.
+            client.cookies.set(jwt_cookie.name, renewed, domain=jwt_cookie.domain, path=jwt_cookie.path)
+        self._refresh_backoff.pop(key, None)
+        log.info("session_refreshed")
+        return True
+
+    def _back_off_refresh(self, key: str, seconds: float) -> None:
+        now = time.monotonic()
+        # Expired entries are dropped first, so the map holds only currently failing tokens.
+        self._refresh_backoff = {k: until for k, until in self._refresh_backoff.items() if until > now}
+        self._refresh_backoff[key] = now + seconds
+
+    @staticmethod
+    def _cookie_names(cookies: httpx.Cookies) -> str:
+        return ",".join(sorted({re.sub(r"[^A-Za-z0-9._-]", "", c.name)[:40] for c in cookies.jar}))
+
+    @staticmethod
+    def _renew_cookie_header(client: httpx.AsyncClient, headers: dict[str, str]) -> None:
+        """An explicit cookie header (sent across hosts) must carry the renewed token, not the old one."""
+        if "cookie" in headers:
+            headers["cookie"] = "; ".join(f"{c.name}={c.value}" for c in client.cookies.jar)
 
     async def keep_alive(self, session: dict[str, Any], *, within: int = 900) -> bool:
         """Proactively renew this session's access token well before it expires.
@@ -2086,7 +2122,7 @@ class JioMartClient:
         Meant for a background keep-alive loop rather than a customer-facing request: it
         refreshes only when the token is unreadable or expires within ``within`` seconds,
         and persists any renewed cookie back onto ``session``. Returns whether the session
-        is still usable, so a caller can stop polling a session whose refresh failed.
+        is still usable: renewed, or not renewed (failed or backing off) but not yet expired.
         """
         async with self._client(session.get("cookies")) as client:
             cookie = self._access_token_cookie(client.cookies)
@@ -2098,7 +2134,7 @@ class JioMartClient:
             await self._ensure_application_token(client)
             ok = await self._refresh_session(client)
             self._save_cookies(session, client.cookies)
-            return ok
+            return ok or (exp is not None and exp > datetime.now(UTC).timestamp())
 
     async def _ensure_application_token(self, client: httpx.AsyncClient) -> None:
         """Read the public storefront bootstrap only when no token was configured.

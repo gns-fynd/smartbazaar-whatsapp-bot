@@ -14,7 +14,9 @@ from smartbazaar.jiomart import CommerceError, JioMartClient  # noqa: I001
 
 APP_ID = "685945f46c8c7aee3f3af605"
 ADDRESS_PATH = "/service/application/cart/v1.0/address"
-REFRESH_PATH = "/service/application/user/authentication/v1.0/token/refresh"
+# JioMart scopes the R.session refresh cookie to this /api prefix; observed live on 19 October.
+REFRESH_PATH = "/api/service/application/user/authentication/v1.0/token/refresh"
+REFRESH_COOKIE_PATH = "/api/service/application/user/authentication"
 
 
 def _fake_jwt(exp: int) -> str:
@@ -28,6 +30,14 @@ def _fake_jwt(exp: int) -> str:
 
 def _session_with_token(token: str) -> dict:
     return {"cookies": [{"name": "access_token", "value": token, "domain": "", "path": "/"}]}
+
+
+def _live_shaped_session(token: str) -> dict:
+    """The cookie names, domains and paths a live OTP login stored (values are fakes)."""
+    return {"cookies": [
+        {"name": "f.session", "value": token, "domain": ".jiomartjcp.com", "path": "/"},
+        {"name": "R.session", "value": "opaque-refresh", "domain": ".jiomartjcp.com", "path": REFRESH_COOKIE_PATH},
+    ]}
 
 
 def test_unverified_phone_cannot_establish_account_identity():
@@ -395,8 +405,9 @@ async def test_proactive_refresh_renews_the_token_before_it_expires():
     async def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
         if request.url.path.endswith("/token/refresh"):
-            assert json.loads(request.content) == {"access_token": old_token}
-            return httpx.Response(200, json={"access_token": new_token})
+            # Like the website: no body; the cookies authenticate the refresh.
+            assert request.content == b""
+            return httpx.Response(200, json={"access_token": new_token, "exp": now + 3600})
         return httpx.Response(200, json={"success": True, "items": []})
 
     session = _session_with_token(old_token)
@@ -407,28 +418,150 @@ async def test_proactive_refresh_renews_the_token_before_it_expires():
 
 
 @pytest.mark.asyncio
-async def test_refresh_falls_back_to_cookie_only_body_after_a_400_on_the_documented_body(caplog):
+async def test_refresh_reaches_the_path_scoped_refresh_cookie_on_the_api_host():
     now = int(time.time())
     old_token, new_token = _fake_jwt(now + 60), _fake_jwt(now + 3600)
-    bodies = []
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        names = sorted(part.split("=")[0].strip() for part in request.headers.get("cookie", "").split(";") if part)
+        seen.append((request.url.host, request.url.path, names))
+        if request.url.path.endswith("/token/refresh"):
+            assert request.content == b""
+            return httpx.Response(
+                200, json={"access_token": new_token, "exp": now + 3600},
+                headers={"set-cookie": f"f.session={new_token}; Max-Age=3600; Domain=.jiomartjcp.com; Path=/; "
+                                       "HttpOnly; Secure; SameSite=Strict"},
+            )
+        return httpx.Response(200, json={"success": True, "items": []})
+
+    session = _live_shaped_session(old_token)
+    await client(handler).get_addresses(session)
+
+    assert seen == [
+        # Only a URL under the cookie's /api path carries R.session; the old unprefixed one never did.
+        ("api.jiomartjcp.com", REFRESH_PATH, ["R.session", "f.session"]),
+        ("api.jiomartjcp.com", ADDRESS_PATH, ["f.session"]),
+    ]
+    access = [c for c in session["cookies"] if c["name"] == "f.session"]
+    assert [c["value"] for c in access] == [new_token]
+    assert any(c["name"] == "R.session" and c["path"] == REFRESH_COOKIE_PATH for c in session["cookies"])
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_refresh_backs_off_instead_of_adding_a_call_to_every_request(monkeypatch, caplog):
+    now = int(time.time())
+    token = _fake_jwt(now + 60)
+    clock = [1000.0]
+    monkeypatch.setattr("smartbazaar.jiomart.time.monotonic", lambda: clock[0])
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("/token/refresh"):
+            return httpx.Response(400, json={"message": "Either access_token or refresh token cookie is required"})
+        return httpx.Response(200, json={"success": True, "items": []})
+
+    jiomart = client(handler)
+    with caplog.at_level("INFO", logger="smartbazaar"):
+        await jiomart.get_addresses(_session_with_token(token))
+        # One attempt only: no second request shape after the 400.
+        assert calls == [REFRESH_PATH, ADDRESS_PATH]
+
+        calls.clear()
+        clock[0] += 14 * 60
+        await jiomart.get_addresses(_session_with_token(token))
+        assert calls == [ADDRESS_PATH]
+        assert "session_refresh_skipped reason=backoff" in caplog.text
+
+        calls.clear()
+        clock[0] += 2 * 60
+        await jiomart.get_addresses(_session_with_token(token))
+        assert calls == [REFRESH_PATH, ADDRESS_PATH]
+    assert "session_refresh_failed status=400 cookies=access_token" in caplog.text
+    assert token not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_backed_off_refresh_fails_an_expired_request_fast(monkeypatch):
+    now = int(time.time())
+    token = _fake_jwt(now + 3600)
+    monkeypatch.setattr("smartbazaar.jiomart.time.monotonic", lambda: 1000.0)
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("/token/refresh"):
+            return httpx.Response(401, json={"message": "invalid refresh token"})
+        return httpx.Response(401, json={"message": "expired"})
+
+    jiomart = client(handler)
+    with pytest.raises(CommerceError) as first:
+        await jiomart.get_addresses(_session_with_token(token))
+    assert first.value.code == "auth_expired" and calls == [ADDRESS_PATH, REFRESH_PATH]
+
+    calls.clear()
+    with pytest.raises(CommerceError) as second:
+        await jiomart.get_addresses(_session_with_token(token))
+    assert second.value.code == "auth_expired" and calls == [ADDRESS_PATH]
+
+
+@pytest.mark.asyncio
+async def test_a_transient_refresh_failure_is_retried_after_a_short_backoff(monkeypatch):
+    now = int(time.time())
+    old_token, new_token = _fake_jwt(now + 60), _fake_jwt(now + 3600)
+    clock = [1000.0]
+    monkeypatch.setattr("smartbazaar.jiomart.time.monotonic", lambda: clock[0])
+    refreshes = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/token/refresh"):
-            bodies.append(request.content)
-            if request.content:
-                return httpx.Response(400, json={"message": "bad request"})
+            refreshes.append(clock[0])
+            if len(refreshes) == 1:
+                return httpx.Response(503, text="busy")
             return httpx.Response(200, json={"access_token": new_token})
         return httpx.Response(200, json={"success": True, "items": []})
 
+    jiomart = client(handler)
     session = _session_with_token(old_token)
-    with caplog.at_level("INFO", logger="smartbazaar"):
-        await client(handler).get_addresses(session)
+    await jiomart.get_addresses(session)
+    clock[0] += 30
+    await jiomart.get_addresses(session)
+    assert refreshes == [1000.0]
 
-    assert len(bodies) == 2
-    assert json.loads(bodies[0]) == {"access_token": old_token}
-    assert bodies[1] == b""
+    clock[0] += 31
+    await jiomart.get_addresses(session)
+    assert refreshes == [1000.0, 1061.0]
     assert session["cookies"][0]["value"] == new_token
-    assert "session_refreshed variant=cookie" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_refresh_sends_the_renewed_token_in_an_explicit_cookie_header():
+    now = int(time.time())
+    old_token, new_token = _fake_jwt(now + 3600), _fake_jwt(now + 7200)
+    storefront_cookies = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token/refresh"):
+            return httpx.Response(200, json={"access_token": new_token})
+        storefront_cookies.append(request.headers.get("cookie", ""))
+        if new_token not in request.headers.get("cookie", ""):
+            return httpx.Response(401, text="expired")
+        return httpx.Response(200, json={"items": []})
+
+    jiomart = client(handler)
+    session = _live_shaped_session(old_token)
+    async with jiomart._client(session["cookies"]) as http:
+        # Cross-host requests carry the session cookie as an explicit header built beforehand.
+        cookie = "; ".join(f"{c.name}={c.value}" for c in http.cookies.jar)
+        response = await jiomart._request(
+            http, "GET", "https://www.jiomart.com/api/service/application/order/v1.0/orders",
+            stage="orders_storefront", headers={"cookie": cookie},
+        )
+
+    assert response.status_code == 200
+    assert len(storefront_cookies) == 2
+    assert old_token in storefront_cookies[0] and new_token in storefront_cookies[1]
 
 
 @pytest.mark.asyncio
@@ -497,6 +630,19 @@ async def test_keep_alive_refreshes_and_saves_a_token_near_expiry():
     session = _session_with_token(old_token)
     assert await client(handler).keep_alive(session, within=900) is True
     assert session["cookies"][0]["value"] == new_token
+
+
+@pytest.mark.asyncio
+async def test_keep_alive_reports_whether_a_session_survives_a_failed_refresh():
+    now = int(time.time())
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == REFRESH_PATH
+        return httpx.Response(400, json={"message": "No refresh token found in access token"})
+
+    # Still within its lifetime, the token stays usable; an already expired one does not.
+    assert await client(handler).keep_alive(_session_with_token(_fake_jwt(now + 300)), within=900) is True
+    assert await client(handler).keep_alive(_session_with_token(_fake_jwt(now - 10)), within=900) is False
 
 
 @pytest.mark.asyncio
