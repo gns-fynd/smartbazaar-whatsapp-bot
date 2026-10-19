@@ -27,6 +27,7 @@ from .order_watch import OrderWatcher
 from .privacy import router as privacy_router
 from .session_keepalive import keepalive_loop
 from .storage import Store
+from .tts import FishAudioTTS
 from .whatsapp import DeliveryError, WhatsApp, inbound_media_reference, valid_signature
 
 log = logging.getLogger("smartbazaar")
@@ -67,6 +68,8 @@ def delivery_error_code(status):
 
 def outbound_transport_status(error_code: str) -> str | None:
     """Keep provider failures visible even when the HTTP process is alive."""
+    if error_code == "tts_failed":
+        return None  # A voice-note synthesis failure says nothing about WhatsApp itself.
     return "auth_rejected" if error_code in {"http_401", "http_403"} else "unavailable"
 
 
@@ -102,19 +105,28 @@ def create_app(settings=None, commerce=None, agent=None, transport=None, media=N
             settings.openai_api_key.get_secret_value(), settings.openai_model,
             cart_writes=settings.jiomart_cart_writes, checkout=settings.jiomart_checkout,
         )
+        app.state.tts = None
         if transport:
             app.state.transport = transport
         elif settings.channel_provider == "openwa":
+            # OpenWA/fallback transports have no voice-note support; they just skip it.
             app.state.transport = OpenWA(
                 settings.openwa_base_url,
                 settings.openwa_api_key.get_secret_value(),
                 settings.openwa_session_id,
             )
         else:
+            if settings.fish_audio_api_key.get_secret_value():
+                app.state.tts = FishAudioTTS(
+                    settings.fish_audio_api_key.get_secret_value(),
+                    settings.fish_audio_model,
+                    settings.fish_audio_voice_id,
+                )
             app.state.transport = WhatsApp(
                 settings.meta_access_token.get_secret_value(),
                 settings.meta_phone_number_id,
                 settings.meta_graph_version,
+                tts=app.state.tts,
             )
         app.state.public_origin = public_origin(settings.public_base_url or settings.render_external_url)
         # Without a configured origin, ask the local tunnel itself; request headers are never trusted.
@@ -129,7 +141,9 @@ def create_app(settings=None, commerce=None, agent=None, transport=None, media=N
         app.state.watcher = OrderWatcher(app.state.store, app.state.commerce)
         app.state.watch_interval = settings.order_watch_interval_seconds
         app.state.conversation = Conversation(
-            app.state.store, app.state.commerce, app.state.agent, app.state.checkout
+            app.state.store, app.state.commerce, app.state.agent, app.state.checkout,
+            # Only active when a TTS key is configured; Conversation itself never sees the key.
+            voice_replies=settings.voice_replies if settings.fish_audio_api_key.get_secret_value() else "off",
         )
         app.state.media = media or MediaProcessor(
             settings.meta_access_token.get_secret_value(), settings.meta_graph_version, app.state.agent
@@ -176,6 +190,8 @@ def create_app(settings=None, commerce=None, agent=None, transport=None, media=N
                     await job
             await app.state.commerce.close()
             await app.state.transport.close()
+            if app.state.tts is not None:
+                await app.state.tts.close()
             await app.state.media.close()
             if app.state.channel_probe is not None:
                 await app.state.channel_probe.close()

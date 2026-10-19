@@ -419,6 +419,65 @@ def test_signed_guest_greeting_delivers_ai_quick_reply_without_commerce_login(tm
         assert card["buttons"][0]["title"] == "Connect JioMart"
 
 
+def test_voice_note_tts_failure_is_not_retried_and_does_not_fall_back_to_the_text_reply(tmp_path):
+    from smartbazaar.agent import Intent
+
+    class VoiceAgent(FakeAgent):
+        async def interpret(self, text, context):
+            return Intent(action="help", reply="Here is your answer.", presentation="text")
+
+    class FailingVoiceWhatsApp(FakeWhatsApp):
+        supports_interactive = True
+
+        async def send(self, recipient, message):
+            if isinstance(message, dict) and message.get("type") == "voice_note":
+                raise DeliveryError("tts_failed")
+            return await super().send(recipient, message)
+
+    transport = FailingVoiceWhatsApp()
+    commerce = FakeCommerce()
+    # Voice replies only need the key and mode; no live Fish Audio call happens in this test
+    # because the fake transport raises before any TTS client would be used.
+    voice_settings = Settings(
+        _env_file=None,
+        database_path=str(tmp_path / "bot.sqlite3"),
+        session_encryption_key=Fernet.generate_key().decode(),
+        meta_app_secret="app-secret",
+        meta_access_token="token",
+        meta_waba_id="waba-1",
+        meta_phone_number_id="phone-1",
+        webhook_verify_token="verify-token",
+        allowed_whatsapp_numbers="919000000001",
+        openai_api_key="not-used",
+        fish_audio_api_key="fish-key",
+        voice_replies="always",
+    )
+    app = create_app(voice_settings, commerce=commerce, agent=VoiceAgent(), transport=transport)
+    raw, _ = signed_payload("app-secret", mid="voice-msg")
+    payload = json.loads(raw)
+    payload["entry"][0]["changes"][0]["value"]["messages"][0]["text"]["body"] = "hi"
+    raw = json.dumps(payload).encode()
+    signature = "sha256=" + hmac.new(b"app-secret", raw, hashlib.sha256).hexdigest()
+    with TestClient(app) as client:
+        result = client.post("/webhooks/whatsapp", content=raw, headers={"x-hub-signature-256": signature})
+        assert result.status_code == 200
+
+        def settled():
+            outbox = client.get("/healthz").json()["outbox"]
+            return outbox.get("sent") == 1 and outbox.get("failed") == 1
+
+        wait_for(settled)
+        # The voice note failed and was never retried or replaced by the text reply again;
+        # the text reply (already a separate message, with its own buttons) was sent once.
+        assert len(transport.sent) == 1
+        recipient, message = transport.sent[0]
+        assert recipient == "919000000001"
+        assert message["type"] == "quick_reply" and message["body"] == "Here is your answer."
+        assert client.get("/healthz").json()["outbox"] == {"sent": 1, "failed": 1}
+        # A speech failure says nothing about WhatsApp: the channel still reads as available.
+        assert app.state.outbound_transport_status == "available"
+
+
 def test_render_external_url_is_the_public_origin_when_none_is_configured(tmp_path, monkeypatch):
     monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://smartbazaar-whatsapp-bot.onrender.com")
     app = create_app(settings(tmp_path), commerce=FakeCommerce(), agent=FakeAgent(), transport=FakeWhatsApp(), media=FakeMedia())

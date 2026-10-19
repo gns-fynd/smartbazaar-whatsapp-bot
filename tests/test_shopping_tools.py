@@ -293,3 +293,78 @@ def test_long_replies_preserve_all_lines_within_channel_limit():
     assert len(chunks) > 1
     assert all(len(chunk) <= 3900 for chunk in chunks)
     assert "\n".join(chunks) == summary
+
+
+def order(order_id, days_ago, *items, cancelled=False):
+    return {"order_id": order_id, "created_at": time.time() - days_ago * 86400, "status": "Cancelled" if cancelled else "Delivered",
+            "shipments": [{"state": "cancelled" if cancelled else "delivered"}],
+            "items": [{"item_id": i, "name": n, "brand": b, "size": "OS", "quantity": 1} for i, n, b in items]}
+
+
+AMUL = ("amul", "Amul Curd 500 g", "Amul")
+MOTHER = ("mother", "Mother Dairy Curd 400 g", "Mother Dairy")
+
+
+class OrdersCommerce(Commerce):
+    def __init__(self, orders, details=None, products=None):
+        super().__init__(products)
+        self.orders, self.details, self.detail_calls = orders, details or {}, []
+
+    async def list_orders(self, session):
+        return self.orders
+
+    async def get_order_detail(self, session, order_id):
+        self.detail_calls.append(order_id)
+        return self.details[order_id]
+
+
+@pytest.mark.asyncio
+async def test_history_comes_from_the_accounts_own_orders_most_bought_first(state):
+    commerce = OrdersCommerce(
+        [order("o1", 2, MOTHER), order("o2", 10, AMUL), order("o3", 20, AMUL),
+         order("o4", 1, ("nestle", "Nestle Dahi 400 g", "Nestle"), cancelled=True),
+         {"order_id": "o5", "created_at": time.time() - 30 * 86400, "status": "Delivered", "shipments": [], "items": []}],
+        details={"o5": order("o5", 30, AMUL)},
+    )
+    memory = {}
+    await tools_for(commerce).refresh_history(state, memory, force=True)
+
+    items = memory["history"]["items"]
+    # Bought in three orders beats bought once more recently; cancelled orders never count.
+    assert [(item["id"], item["orders"]) for item in items] == [("amul", 3), ("mother", 1)]
+    assert commerce.detail_calls == ["o5"] and commerce.history_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_dahi_means_your_usual_from_past_orders(state):
+    cart = Cart()
+    commerce = OrdersCommerce([order("o1", 3, AMUL), order("o2", 9, AMUL)])
+    reply = await tools_for(commerce, cart).execute(Intent(action="add", items=[ShoppingLine(query="dahi")]), state, {})
+
+    assert commerce.queries == ["Amul Curd 500 g"]
+    assert cart.adds == [[("amul", 1)]]
+    assert "1 × Amul Curd 500 g (your usual)" in reply[0]
+
+
+@pytest.mark.asyncio
+async def test_a_choice_puts_something_bought_before_first(state):
+    # Bought too long ago to pick it automatically, but still worth pointing out.
+    commerce = OrdersCommerce([order("o1", 200, MOTHER)])
+    asked = await tools_for(commerce).execute(Intent(action="add", items=[ShoppingLine(query="curd")]), state, {})
+
+    menu = asked[-1]
+    assert menu["rows"][0]["title"].startswith("Mother Dairy Curd")
+    assert "1. Mother Dairy Curd 400 g — 400 g (you've bought this before)" in menu["body"]
+
+
+def test_a_chat_order_counts_as_purchase_evidence_straight_away():
+    from smartbazaar.checkout import clear_ordered_lines
+
+    memory = {"cart_products": {str(("amul", "OS")): {"id": "amul", "name": "Amul Curd 500 g", "brand": "Amul"}}}
+    clear_ordered_lines(memory, {"order_id": "FY1", "at": time.time(), "ordered_keys": [["amul", "OS"]]})
+    clear_ordered_lines(memory, {"order_id": "FY1", "at": time.time(), "ordered_keys": [["amul", "OS"]]})
+    assert [(i["id"], i["orders"]) for i in memory["history"]["items"]] == [("amul", 1)]
+
+    clear_ordered_lines(memory, {"order_id": "FY2", "at": time.time(), "ordered_keys": [["amul", "OS"]]})
+    assert memory["history"]["items"][0]["orders"] == 2
+    assert remembered_choice(memory, "dahi", time.time())["product"]["id"] == "amul"

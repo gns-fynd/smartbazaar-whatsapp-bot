@@ -3,6 +3,7 @@
 import re
 import secrets
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from .agent import AgentError, Intent
@@ -13,6 +14,7 @@ from .jiomart import CommerceError
 from .memory import recent_turns, remember_exchange, roll_session
 from .orders import OrdersFlow
 from .tools import ShoppingTools
+from .tts import spoken_text
 
 # Tap targets stay valid for a day; anything account-changing re-checks its own state.
 BUTTON_TTL = 24 * 3600
@@ -31,6 +33,8 @@ COMMANDS = {
 ACCOUNT_ONLY = {"history", "orders", "reorder", "cart", "checkout", "track", "addresses", "search"}
 VIEWED_ADDS = {"add to cart", "add it", "add this", "add that", "add it to cart", "add this to cart",
                "add it to my cart", "add this to my cart", "buy it", "buy this", "i want this", "i'll take it"}
+# Card types whose "body" is the reply's spoken-aloud text for a voice-note reply.
+VOICE_TEXT_TYPES = {"quick_reply", "list", "choice_card", "cart_card", "product_card"}
 
 
 class Written(list):
@@ -47,12 +51,15 @@ def mobile_number(value: str) -> str | None:
 
 
 class Conversation:
-    def __init__(self, store, commerce, agent, checkout=None):
+    def __init__(self, store, commerce, agent, checkout=None, voice_replies: str = "off"):
         self.store, self.commerce, self.agent = store, commerce, agent
         self.checkout = checkout or CheckoutFlow(store, commerce)
         self.tools = ShoppingTools(commerce, agent, self.checkout)
         self.orders = OrdersFlow(store, commerce, self.checkout)
         self.composer = Composer(agent)
+        # "off" | "voice" (only for a transcribed voice note) | "always"; the caller resolves
+        # this against whether a TTS key is configured, so Conversation never sees that secret.
+        self.voice_replies = voice_replies
         # The action behind the reply being built, per owner (owners are processed one at a time).
         self._last_action: dict[str, str] = {}
 
@@ -68,6 +75,9 @@ class Conversation:
             # Tools supply the facts; the model writes the reply, and the composer checks it.
             customer = "(tapped a button)" if text.startswith("/button:") else text
             replies = await self.composer.apply(customer, replies)
+        # Captured before the "heard" quote or buttons are added, so the spoken text is only
+        # ever the bot's own answer, never an echo of the transcript or a tap target.
+        to_speak = self._voice_text(replies) if self._voice_reply_enabled(voice) else None
         if voice and replies:
             # Show what was heard, so a mis-heard voice note is obvious.
             heard = "🎤 “" + " ".join(text.split())[:300] + "”"
@@ -76,8 +86,32 @@ class Conversation:
             else:
                 replies = [heard] + replies
         replies = self._with_buttons(owner, replies)
+        if to_speak:
+            spoken = spoken_text(to_speak)
+            if spoken:
+                # After the text: synthesis takes a few seconds, and the text with its buttons
+                # should never wait for it. The voice note follows as the spoken version.
+                replies = replies + [{"type": "voice_note", "text": spoken}]
         notice = self._missed_notice(owner)
         return ([notice] + replies) if notice else replies
+
+    def _voice_reply_enabled(self, voice: bool) -> bool:
+        if self.voice_replies == "always":
+            return True
+        return self.voice_replies == "voice" and voice
+
+    @staticmethod
+    def _voice_text(replies) -> str | None:
+        """The reply's main text: the first str, or the ``body`` of a text-bearing card."""
+        if not replies:
+            return None
+        first = replies[0]
+        if isinstance(first, str):
+            return first
+        if isinstance(first, Mapping) and first.get("type") in VOICE_TEXT_TYPES:
+            body = first.get("body")
+            return body if isinstance(body, str) else None
+        return None
 
     def _composable(self, text: str, replies) -> bool:
         """Account, OTP and address replies stay deterministic; model-written replies aren't redone."""

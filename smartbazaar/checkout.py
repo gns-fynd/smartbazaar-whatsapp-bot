@@ -735,8 +735,33 @@ class CheckoutFlow:
 
 
 def clear_ordered_lines(memory: dict, record: dict) -> None:
-    """Note a placed order for this account (the cart itself is emptied by JioMart)."""
+    """Note a placed order for this account (the cart itself is emptied by JioMart).
+
+    Its products count as purchase evidence right away ("your usual"), before JioMart's own
+    order list catches up on the next history refresh.
+    """
     orders = memory.setdefault("orders", [])
-    if record.get("order_id") not in {order.get("order_id") for order in orders}:
-        orders.insert(0, {"order_id": record.get("order_id"), "total": record.get("total"), "at": record.get("at")})
-        del orders[5:]
+    if record.get("order_id") in {order.get("order_id") for order in orders}:
+        return
+    orders.insert(0, {"order_id": record.get("order_id"), "total": record.get("total"), "at": record.get("at")})
+    del orders[5:]
+    if memory.get("history_import_disabled"):
+        return
+    at = record.get("at") or time.time()
+    known = memory.get("cart_products", {})
+    history = memory.setdefault("history", {"status": "orders", "items": []})
+    history["checked_at"] = max(history.get("checked_at", 0), at)
+    items = history.setdefault("items", [])
+    for key in record.get("ordered_keys", []):
+        product = known.get(str(tuple(key)))
+        if not isinstance(product, dict) or not product.get("id") or not product.get("name"):
+            continue
+        entry = next((item for item in items if item.get("id") == product["id"]), None)
+        if entry:
+            entry["orders"] = entry.get("orders", 1) + 1
+            entry["purchased_at"] = max(entry.get("purchased_at") or 0, at)
+        else:
+            items.append({**{k: product.get(k) for k in ("id", "name", "brand", "pack", "category")},
+                          "purchased_at": at, "orders": 1})
+    items.sort(key=lambda item: (item.get("orders", 1), item.get("purchased_at") or 0), reverse=True)
+    del items[MAX_REMEMBERED:]

@@ -15,10 +15,28 @@ from .jiomart import CommerceError
 from .memory import PENDING_TTL, PREFERENCE_TTL, canonical_query, remembered_choice
 
 FOCUS_TTL = 6 * 3600
+MAX_HISTORY_ORDERS = 12
+MAX_HISTORY_DETAILS = 4
+MAX_HISTORY_ITEMS = 50
+
+
+def _cancelled(order: dict) -> bool:
+    shipments = order.get("shipments") or []
+    states = {shipment.get("state") for shipment in shipments}
+    return (bool(shipments) and states <= {"cancelled"}) or "cancel" in str(order.get("status") or "").casefold()
 
 
 def _price(value) -> str:
     return f"₹{value:g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else ""
+
+
+def _usual_first(memory: dict, products: list[dict]) -> list[dict]:
+    """Put anything the customer has bought before at the top of a choice, and say so."""
+    bought = {str(item.get("id")) for item in memory.get("history", {}).get("items", []) if item.get("id")}
+    if memory.get("history_import_disabled") or not bought:
+        return products
+    marked = [{**product, "usual": True} if str(product.get("id")) in bought else product for product in products]
+    return sorted(marked, key=lambda product: not product.get("usual"))
 
 
 def _short_label(index: int, product: dict) -> str:
@@ -43,14 +61,63 @@ class ShoppingTools:
         if not force and now - memory.get("history", {}).get("checked_at", 0) < 86400:
             return
         try:
-            result = await self.commerce.get_purchase_history(state["session"])
+            result = await self._history_from_orders(state)
+        except CommerceError as exc:
+            if exc.code == "auth_expired":
+                raise
+            result = None
         except AttributeError:
-            result = {"status": "unavailable", "items": []}
-        except CommerceError:
-            # History is optional and may have separate consumer access scopes.
-            # A failure here must not destroy a working search/account session.
-            result = {"status": "unavailable", "items": []}
+            result = None
+        if result is None:
+            try:
+                result = await self.commerce.get_purchase_history(state["session"])
+            except (AttributeError, CommerceError):
+                # History is optional and may have separate consumer access scopes.
+                # A failure here must not destroy a working search/account session.
+                result = {"status": "unavailable", "items": []}
         memory["history"] = {**result, "checked_at": now}
+
+    async def _history_from_orders(self, state: dict) -> dict | None:
+        """Purchase evidence from the account's own orders (the reads behind ORDERS).
+
+        JioMart's history endpoint returns nothing for this account, while My Orders does. Each
+        product bought in a non-cancelled order counts once per order; the most often and most
+        recently bought one comes first, so "dahi" can mean "your usual Amul Masti Dahi 400 g".
+        """
+        orders = await self.commerce.list_orders(state["session"])
+        if not orders:
+            return None
+        evidence: dict[str, dict] = {}
+        details = 0
+        for order in orders[:MAX_HISTORY_ORDERS]:
+            if _cancelled(order):
+                continue
+            items = order.get("items") or []
+            if not items and order.get("order_id") and details < MAX_HISTORY_DETAILS:
+                details += 1
+                try:
+                    detail = await self.commerce.get_order_detail(state["session"], order["order_id"])
+                except CommerceError as exc:
+                    if exc.code == "auth_expired":
+                        raise
+                    continue
+                if _cancelled(detail):
+                    continue
+                items = detail.get("items") or []
+            bought_at = order.get("created_at")
+            for item in items:
+                item_id = item.get("item_id")
+                if not item_id or not item.get("name") or not isinstance(bought_at, (int, float)):
+                    continue
+                entry = evidence.setdefault(str(item_id), {
+                    "id": str(item_id), "name": item["name"], "brand": item.get("brand"),
+                    "pack": item.get("size") if item.get("size") not in {None, "OS", "ONE SIZE"} else None,
+                    "category": None, "purchased_at": bought_at, "orders": 0,
+                })
+                entry["orders"] += 1
+                entry["purchased_at"] = max(entry["purchased_at"], bought_at)
+        items = sorted(evidence.values(), key=lambda e: (e["orders"], e["purchased_at"]), reverse=True)
+        return {"status": "orders", "items": items[:MAX_HISTORY_ITEMS]}
 
     @staticmethod
     def context(memory: dict, state: dict | None = None) -> dict:
@@ -102,7 +169,8 @@ class ShoppingTools:
         lines = [f"Which {item['query']} would you like?" + (f" (1 of {len(items)} to choose)" if len(items) > 1 else "")]
         for i, product in enumerate(products, 1):
             detail = " · ".join(part for part in (product.get("pack") or "", _price(product.get("price"))) if part)
-            lines.append(f"{i}. {product['name']}" + (f" — {detail}" if detail else ""))
+            lines.append(f"{i}. {product['name']}" + (f" — {detail}" if detail else "")
+                         + (" (you've bought this before)" if product.get("usual") else ""))
         lines.append("Tap a number to add it to your cart" + (", or Skip." if len(products) < 3 else ", or say ‘skip’."))
         body = "\n".join(lines)[:1024]
         buttons = [{"id": token, "title": _short_label(i + 1, products[i])} for token, i in tokens.items()]
@@ -233,6 +301,7 @@ class ShoppingTools:
             query = canonical_query(item.query)
             preference = remembered_choice(memory, query, time.time())
             search_query = preference["product"]["name"] if preference else query
+            by_id: dict = {}
             try:
                 result = await self.commerce.search(search_query, state["location"], state["session"])
                 products = normalize_products(result.get("items", []))
@@ -249,7 +318,10 @@ class ShoppingTools:
                 exact, alternatives = [], []
             chosen = None
             if preference:
-                chosen = next((p for p in exact if p["id"] == preference["product"]["id"]), None)
+                usual = by_id.get(preference["product"]["id"])
+                # The exact product they asked for before, still listed here; never a lookalike.
+                chosen = next((p for p in exact if p["id"] == preference["product"]["id"]), None) or (
+                    usual if usual and product_matches_exact(query, usual) else None)
                 if chosen:
                     why[chosen["id"]] = preference["source"]
             elif len(exact) == 1:
@@ -257,7 +329,8 @@ class ShoppingTools:
             if chosen:
                 confident.append({"product": chosen, "quantity": item.quantity})
             elif exact or alternatives:
-                questions.append({"query": query, "quantity": item.quantity, "products": (exact or alternatives)[:3]})
+                questions.append({"query": query, "quantity": item.quantity,
+                                  "products": _usual_first(memory, (exact or alternatives)[:3])})
             else:
                 missing.append(query)
         # The newest request wins: older unanswered questions are dropped, never carried forward.
@@ -287,7 +360,7 @@ class ShoppingTools:
             for entry in result["added"]:
                 name = entry.split(" × ", 1)[-1]
                 source = reasons.get(name)
-                suffix = " (your saved choice)" if source == "explicit" else " (from your past orders)" if source == "purchase_history" else ""
+                suffix = " (your saved choice)" if source == "explicit" else " (your usual)" if source == "purchase_history" else ""
                 named.append(entry + suffix)
             notes.append("🛒 Added to your JioMart cart:\n" + "\n".join(f"• {entry}" for entry in named))
         if result["already"]:

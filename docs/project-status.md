@@ -36,6 +36,14 @@ This section supersedes the late-evening 18 October section below where they dif
 
 - `open_payment_session` follows payment redirects with the account cookie while the host ends in `jiomart.com` or `jiomartjcp.com`, using a plain suffix match rather than the dot-boundary match now used for invoice downloads and payment links. A lookalike host such as `evil-jiomart.com` would have passed. No such redirect was observed. Fixed later on 19 October: hops now use the same dot-boundary match (`host == h or host.endswith("." + h)`), and `tests/test_commerce_tools.py` checks that a lookalike host is never requested.
 
+### Purchase-history personalisation from real orders (19 October)
+
+The problem statement's "dahi means your usual Amul 400 g" depended on `get_purchase_history`, which returns an empty page for this account. Shyam's guidance was to buy as a customer and build history. History now comes from the same reads as ORDERS (`list_orders`, plus at most four `get_order_detail` calls for orders without items). Each product counts once per non-cancelled order, most bought and then most recent first; the old endpoint remains the fallback. A product the customer usually buys is added directly with "(your usual)" when it is still listed here and passes the exact-match gate. In a choice, anything bought before goes first with "(you've bought this before)". An order placed from chat counts straight away (`clear_ordered_lines`). Tests pass locally; not yet verified on the live account.
+
+### Store-manager voice replies (19 October)
+
+Voice notes now get a spoken reply in the store manager's cloned voice through Fish Audio's free `s2.1-pro-free` model, sent after the text reply. The owner supplied the API key and cloned voice id in the local `.env` and on Render. A live check with them produced an Ogg/Opus mono voice note in about 4 seconds, and the bot's real send path built the correct WhatsApp audio message (`voice: true`) against a mocked Meta API. Not yet heard on a real phone. Cloning a real person's voice requires their consent. See [operations](operations-reliability.md) for settings.
+
 ### Render hosting prepared (19 October, about 04:00 IST)
 
 The owner chose Render to move the bot off the laptop. The repository now has a `Dockerfile`, entrypoint and `render.yaml` Blueprint (one starter service in Singapore with a persistent disk, health check `/healthz`, secrets entered in the dashboard). Pay links use `RENDER_EXTERNAL_URL` when `PUBLIC_BASE_URL` is empty. The image was built and booted locally with dummy settings and passed the checks listed in [operations](operations-reliability.md#render-hosting--19-october-2026). Not yet deployed to Render. Open risk: JioMart may refuse non-Indian IP addresses; check with a LOGIN right after the first deploy.

@@ -41,6 +41,10 @@ services:
         sync: false
       - key: WHATSAPP_DISPLAY_NUMBER
         sync: false
+      - key: FISH_AUDIO_API_KEY
+        sync: false
+      - key: FISH_AUDIO_VOICE_ID
+        sync: false
       # Non-secret settings, matching the live runtime on 19 October 2026.
       - key: OPENAI_MODEL
         value: gpt-6.1-sol
@@ -60,5 +64,7 @@ services:
         value: "false"
       - key: CHECKOUT_MAX_TOTAL
         value: "0"
+      - key: VOICE_REPLIES
+        value: voice
       - key: DATABASE_PATH
         value: /var/data/bot.sqlite3

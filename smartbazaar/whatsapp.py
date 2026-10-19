@@ -1,9 +1,10 @@
-"""Meta transport. No message bodies, tokens or phone numbers are logged."""
+"""Meta transport. No message bodies, tokens, audio or phone numbers are logged."""
 
 import base64
 import binascii
 import hashlib
 import hmac
+import logging
 import re
 from collections.abc import Mapping
 from urllib.parse import urlparse
@@ -12,7 +13,9 @@ import httpx
 
 from .cart_image import build_collage, fetch_images
 from .media import media_reference
+from .tts import TTSError
 
+log = logging.getLogger("smartbazaar")
 MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
 _FILENAME = re.compile(r"[A-Za-z0-9 ._-]{1,120}\.pdf")
 
@@ -33,8 +36,9 @@ def valid_signature(raw: bytes, signature: str, secret: str) -> bool:
 class WhatsApp:
     supports_interactive = True
 
-    def __init__(self, token: str, phone_id: str, version: str, transport=None, image_transport=None):
+    def __init__(self, token: str, phone_id: str, version: str, transport=None, image_transport=None, tts=None):
         self.image_transport = image_transport
+        self.tts = tts
         self.client = httpx.AsyncClient(
             base_url=f"https://graph.facebook.com/{version}/",
             headers={"Authorization": f"Bearer {token}"},
@@ -68,6 +72,8 @@ class WhatsApp:
                 message = message["list"]
         elif isinstance(message, Mapping) and message.get("type") == "document":
             message = await self._document(message)
+        elif isinstance(message, Mapping) and message.get("type") == "voice_note":
+            message = await self._voice_note(message)
         try:
             payload = self._payload(recipient, message)
         except ValueError:
@@ -131,6 +137,24 @@ class WhatsApp:
         return {"type": "document_id", "media_id": media_id, "filename": filename,
                 "caption": caption[:1024] if isinstance(caption, str) else None}
 
+    async def _voice_note(self, message: Mapping) -> dict:
+        """Speak the reply in the store manager's voice. Never retried: see outbox_worker."""
+        text = message.get("text")
+        if not isinstance(text, str) or not text or self.tts is None:
+            log.warning("tts_failed code=not_configured")
+            raise DeliveryError("tts_failed")
+        try:
+            audio, mime = await self.tts.synthesize(text)
+        except TTSError as exc:
+            log.warning("tts_failed code=%s", exc.code)
+            raise DeliveryError("tts_failed") from None
+        is_ogg = mime == "audio/ogg"
+        media_id = await self._upload(audio, mime, "voice-note.ogg" if is_ogg else "voice-note.mp3")
+        log.info("voice_note_sent")
+        # Meta's Cloud API only shows the voice-note mic/waveform treatment for an Opus/Ogg
+        # file sent with "voice": true; a non-Ogg fallback is sent as a basic audio message.
+        return {"type": "audio_id", "media_id": media_id, "voice": is_ogg}
+
     async def _upload(self, content: bytes, mime: str, filename: str) -> str:
         try:
             response = await self.client.post(
@@ -182,6 +206,14 @@ class WhatsApp:
             if message.get("caption"):
                 document["caption"] = message["caption"]
             return {**common, "type": "document", "document": document}
+        if message_type == "audio_id":
+            media_id = message.get("media_id")
+            if not isinstance(media_id, str):
+                raise ValueError("Invalid audio")
+            audio = {"id": media_id}
+            if message.get("voice"):
+                audio["voice"] = True
+            return {**common, "type": "audio", "audio": audio}
         if message_type != "product_card":
             raise ValueError("Unsupported message")
         image_url = message.get("image_url")

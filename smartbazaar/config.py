@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     # JioMart's own cookie lives far longer than an hour; a background keep-alive now
     # renews the access token so a session need not be re-authenticated within this TTL.
     session_ttl_seconds: int = 2592000
+    # Store-manager-voice replies (Fish Audio TTS). Inactive unless the API key is set below.
+    fish_audio_api_key: SecretStr = SecretStr("")
+    fish_audio_model: str = "s2.1-pro-free"
+    # The store manager's cloned voice (Fish Audio reference_id); cloning a real person's voice
+    # needs their consent. Empty uses Fish Audio's default voice.
+    fish_audio_voice_id: str = ""
+    # off | voice (only replies to a transcribed voice note, default) | always
+    voice_replies: str = "voice"
 
     @cached_property
     def allowed_numbers(self) -> set[str]:

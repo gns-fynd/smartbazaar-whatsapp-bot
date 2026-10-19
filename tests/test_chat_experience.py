@@ -212,3 +212,47 @@ async def test_voice_note_goes_through_the_normal_path_and_shows_what_was_heard(
     assert agent.calls[0][0] == "what can you do for me"
     assert body(reply[0]).startswith("🎤 “what can you do for me”\n\nI can track your orders")
     assert reply[-1]["type"] == "quick_reply"
+
+
+@pytest.mark.asyncio
+async def test_voice_reply_adds_one_voice_note_after_the_text_only_for_a_transcribed_voice_note(store):
+    agent = Planner(Intent(action="help", reply="I can track your orders and fill your cart.", presentation="text"))
+    conversation = Conversation(store, Commerce(), agent, voice_replies="voice")
+
+    reply = await conversation.handle("a", "919000000001", "what can you do for me", voice=True)
+
+    # The spoken text is the bot's own answer, not the "🎤 heard" echo or a tap target, and it
+    # follows the text so the buttons never wait for speech synthesis.
+    assert reply[-1] == {"type": "voice_note", "text": "I can track your orders and fill your cart."}
+    assert body(reply[0]).startswith("🎤 “what can you do for me”\n\nI can track your orders")
+    assert reply[-2]["type"] == "quick_reply"
+
+
+@pytest.mark.asyncio
+async def test_voice_reply_in_voice_only_mode_is_skipped_for_typed_text(store):
+    agent = Planner(Intent(action="help", reply="I can track your orders and fill your cart.", presentation="text"))
+    conversation = Conversation(store, Commerce(), agent, voice_replies="voice")
+
+    reply = await conversation.handle("a", "919000000001", "what can you do for me")
+
+    assert all(not (isinstance(r, dict) and r.get("type") == "voice_note") for r in reply)
+
+
+@pytest.mark.asyncio
+async def test_voice_reply_always_mode_speaks_even_a_typed_reply(store):
+    agent = Planner(Intent(action="help", reply="I can track your orders and fill your cart.", presentation="text"))
+    conversation = Conversation(store, Commerce(), agent, voice_replies="always")
+
+    reply = await conversation.handle("a", "919000000001", "what can you do for me")
+
+    assert reply[-1] == {"type": "voice_note", "text": "I can track your orders and fill your cart."}
+
+
+@pytest.mark.asyncio
+async def test_voice_reply_defaults_off_so_a_configured_voice_note_setting_is_required(store):
+    agent = Planner(Intent(action="help", reply="I can track your orders and fill your cart.", presentation="text"))
+    conversation = Conversation(store, Commerce(), agent)  # no voice_replies kwarg: defaults off
+
+    reply = await conversation.handle("a", "919000000001", "what can you do for me", voice=True)
+
+    assert all(not (isinstance(r, dict) and r.get("type") == "voice_note") for r in reply)

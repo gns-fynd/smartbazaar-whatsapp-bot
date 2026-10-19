@@ -86,6 +86,6 @@ def remembered_choice(memory: dict, query: str, now: float) -> dict | None:
     ]
     if not candidates:
         return None
-    # Evidence is already recent-first and restricted to delivered purchases.
+    # Evidence comes from non-cancelled orders, most often and then most recently bought first.
     first = candidates[0]
     return {"product": first, "source": "purchase_history", "expires": now + 3600}
